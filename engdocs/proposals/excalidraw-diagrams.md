@@ -4,7 +4,7 @@ title: "Adopt Excalidraw as Standard Diagramming Tool"
 
 ## Context
 
-The project has no established standard for diagrams. Three tools were evaluated side-by-side across four representative diagram types to pick one. The evaluation is committed under `docs/diagrams-comparison/` (see the [comparison page](../../docs/diagrams-comparison/index.mdx)) and covers:
+The project has no established standard for diagrams. Three tools were evaluated side-by-side across four representative diagram types to pick one. The evaluation covered:
 
 - **A. Simple flowchart** — basic shapes, branching, labels
 - **B. System architecture** — containers, grouping, dense layout (browser → CDN → LB → 2 app servers → DB + replica + Redis)
