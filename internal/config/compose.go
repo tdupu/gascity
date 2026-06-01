@@ -658,11 +658,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
 
-	// Backwards compat: promote deprecated graph_workflows → formula_v2.
-	if root.Daemon.GraphWorkflows && !root.Daemon.FormulaV2 {
-		root.Daemon.FormulaV2 = true
-	}
-
 	// v0.15.1: emit a one-time deprecation warning if the loaded config
 	// still populates the v0.15.0 attachment-list tombstone fields. The
 	// fields still parse (TOML won't error) but are ignored by the new
@@ -958,7 +953,13 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		base.Formulas = fragment.Formulas
 	}
 	if fragMeta.IsDefined("daemon") {
+		formulaV2 := base.Daemon.FormulaV2
+		formulaV2Set := base.Daemon.formulaV2Set
 		base.Daemon = fragment.Daemon
+		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
+			base.Daemon.FormulaV2 = formulaV2
+			base.Daemon.formulaV2Set = formulaV2Set
+		}
 	}
 	if fragMeta.IsDefined("session") {
 		base.Session = fragment.Session
@@ -1334,6 +1335,7 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 		return nil, md, nil, fmt.Errorf("parsing config: %w", err)
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
+	applyDaemonFormulaV2Default(&cfg, md)
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)

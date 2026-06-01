@@ -2,6 +2,7 @@ package formula
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"regexp"
@@ -45,8 +46,20 @@ func CompileWithoutRuntimeVarValidation(_ context.Context, name string, searchPa
 	return compileFormula(name, searchPaths, vars, false)
 }
 
+const explicitGraphRequirementError = `requires: formulas that use graph-only constructs must declare [requires] formula_compiler = ">=2.0.0" or legacy contract = "graph.v2" explicitly`
+
 func compileFormula(name string, searchPaths []string, vars map[string]string, validateRuntimeVars bool) (*Recipe, error) {
 	parser := NewParser(searchPaths...).SetSource(SourceFromEnv())
+	v2Enabled := IsFormulaV2Enabled()
+	var composedRequirements []formulaCompilerConstraint
+	collectComposedRequirements := func(f *Formula) error {
+		constraints, err := formulaCompilerConstraints(f)
+		if err != nil {
+			return err
+		}
+		composedRequirements = append(composedRequirements, constraints...)
+		return nil
+	}
 
 	// Stage 1: Load formula by name
 	f, err := parser.LoadByName(name)
@@ -91,7 +104,7 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	}
 
 	// Stage 5: Apply inline step expansions
-	inlineExpandedSteps, err := ApplyInlineExpansionsWithVars(resolved.Steps, parser, compileVars)
+	inlineExpandedSteps, err := applyInlineExpansionsWithVars(resolved.Steps, parser, compileVars, collectComposedRequirements)
 	if err != nil {
 		return nil, fmt.Errorf("applying inline expansions to %q: %w", name, err)
 	}
@@ -99,7 +112,7 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 
 	// Stage 6: Apply expansion operators (compose.expand/map)
 	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
-		expandedSteps, err := ApplyExpansionsWithVars(resolved.Steps, resolved.Compose, parser, compileVars)
+		expandedSteps, err := applyExpansionsWithVars(resolved.Steps, resolved.Compose, parser, compileVars, collectComposedRequirements)
 		if err != nil {
 			return nil, fmt.Errorf("applying expansions to %q: %w", name, err)
 		}
@@ -109,12 +122,9 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	// Stage 7: Apply aspects from compose.aspects
 	if resolved.Compose != nil && len(resolved.Compose.Aspects) > 0 {
 		for _, aspectName := range resolved.Compose.Aspects {
-			aspectFormula, err := parser.LoadByName(aspectName)
+			aspectFormula, err := loadResolvedAspectFormula(parser, aspectName, collectComposedRequirements)
 			if err != nil {
-				return nil, fmt.Errorf("loading aspect %q: %w", aspectName, err)
-			}
-			if aspectFormula.Type != TypeAspect {
-				return nil, fmt.Errorf("%q is not an aspect formula (type=%s)", aspectName, aspectFormula.Type)
+				return nil, err
 			}
 			if len(aspectFormula.Advice) > 0 {
 				resolved.Steps = ApplyAdvice(resolved.Steps, aspectFormula.Advice)
@@ -150,6 +160,13 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 		resolved.Steps = filteredSteps
 	}
 
+	if err := addFormulaCompilerConstraints(resolved, composedRequirements); err != nil {
+		return nil, err
+	}
+	if err := validateExplicitGraphCompilerRequirement(resolved); err != nil {
+		return nil, err
+	}
+
 	// Stage 10: Expand inline retry-managed steps.
 	retrySteps, err := ApplyRetries(resolved.Steps)
 	if err != nil {
@@ -164,7 +181,11 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	}
 	resolved.Steps = ralphSteps
 
-	graphWorkflow, err := isGraphWorkflow(resolved, IsFormulaV2Enabled())
+	if err := ValidateHostRequirements(resolved, v2Enabled); err != nil {
+		return nil, err
+	}
+
+	graphWorkflow, err := isGraphWorkflow(resolved, v2Enabled)
 	if err != nil {
 		return nil, err
 	}
@@ -175,6 +196,39 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 
 	// Stage 13: Flatten to Recipe
 	return toRecipeWithGraph(resolved, graphWorkflow)
+}
+
+func loadResolvedAspectFormula(parser *Parser, name string, collectRequirements formulaRequirementCollector) (*Formula, error) {
+	aspectFormula, err := parser.LoadByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("loading aspect %q: %w", name, err)
+	}
+	resolved, err := parser.Resolve(aspectFormula)
+	if err != nil {
+		return nil, fmt.Errorf("resolving aspect %q: %w", name, err)
+	}
+	if resolved.Type != TypeAspect {
+		return nil, fmt.Errorf("%q is not an aspect formula (type=%s)", name, resolved.Type)
+	}
+	if collectRequirements != nil {
+		if err := collectRequirements(resolved); err != nil {
+			return nil, fmt.Errorf("collecting requirements for aspect %q: %w", name, err)
+		}
+	}
+	return resolved, nil
+}
+
+func validateExplicitGraphCompilerRequirement(f *Formula) error {
+	if requiresExplicitGraphCompilerRequirement(f) {
+		return errors.New(explicitGraphRequirementError)
+	}
+	return nil
+}
+
+// ValidateExplicitGraphCompilerRequirement verifies that formulas using
+// graph-only constructs explicitly declare a graph-capable formula compiler.
+func ValidateExplicitGraphCompilerRequirement(f *Formula) error {
+	return validateExplicitGraphCompilerRequirement(f)
 }
 
 func validateCompileTimeVars(f *Formula, values map[string]string) error {
@@ -477,25 +531,27 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 	}
 }
 
-// formulaV2Enabled controls whether graph.v2 formula compilation is allowed.
-// When false, isGraphWorkflow returns an error for formulas that explicitly
-// declare the graph.v2 contract.
+// formulaV2Enabled controls whether formula compiler capability v2 is allowed.
+// When false, requirement validation rejects formulas that need compiler v2.
 // Set by the daemon config loader from [daemon] formula_v2.
 //
 // Stored as atomic.Bool so config reload can race safely with in-flight
 // compilation without flipping a compile into the hard formula_v2 error.
-// Each compile snapshots the value once via IsFormulaV2Enabled at the top
-// of toRecipe.
+// Each compile snapshots the value once before loading composed formulas.
 var formulaV2Enabled atomic.Bool
 
-// SetFormulaV2Enabled sets the graph.v2 formula compilation flag. Safe for
+func init() {
+	formulaV2Enabled.Store(true)
+}
+
+// SetFormulaV2Enabled sets the formula compiler v2 flag. Safe for
 // concurrent use with IsFormulaV2Enabled; intended for the daemon config
 // loader and tests.
 func SetFormulaV2Enabled(v bool) {
 	formulaV2Enabled.Store(v)
 }
 
-// IsFormulaV2Enabled reports whether graph.v2 formula compilation is
+// IsFormulaV2Enabled reports whether formula compiler v2 is
 // allowed. Safe for concurrent use.
 func IsFormulaV2Enabled() bool {
 	return formulaV2Enabled.Load()
@@ -505,12 +561,12 @@ func isGraphWorkflow(f *Formula, v2Enabled bool) (bool, error) {
 	if f == nil {
 		return false, nil
 	}
-	graphWorkflow := declaresGraphV2Contract(f)
+	graphWorkflow := UsesGraphCompiler(f)
 	if !graphWorkflow {
 		return false, nil
 	}
 	if !v2Enabled {
-		return false, fmt.Errorf("formula %q declares contract graph.v2 but formula_v2 is disabled; enable [daemon] formula_v2 or remove the graph.v2 contract", f.Formula)
+		return false, fmt.Errorf("formula %q requires formula compiler v2 but formula_v2 is disabled; enable [daemon] formula_v2 or lower the formula requirements", f.Formula)
 	}
 	return true, nil
 }
