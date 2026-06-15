@@ -520,7 +520,7 @@ func TestDoImportAddPlainDirectoryOmitsVersion(t *testing.T) {
 	if err := os.MkdirAll(localPack, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writePackToml(t, localPack, "[pack]\nname = \"local\"\nschema = 1\n")
+	writePackToml(t, localPack, "[pack]\nname = \"suggested-display-name\"\nschema = 1\n")
 
 	prevSync := syncImports
 	t.Cleanup(func() { syncImports = prevSync })
@@ -547,6 +547,20 @@ func TestDoImportAddPlainDirectoryOmitsVersion(t *testing.T) {
 	}
 	if imp.Version != "" {
 		t.Fatalf("Version = %q, want empty", imp.Version)
+	}
+	text, err := os.ReadFile(filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(pack.toml): %v", err)
+	}
+	for _, forbidden := range []string{
+		"suggested-display-name",
+		"export",
+		"transitive",
+		"shadow",
+	} {
+		if strings.Contains(string(text), forbidden) {
+			t.Fatalf("authored import leaked %q into pack.toml:\n%s", forbidden, string(text))
+		}
 	}
 }
 
@@ -1520,6 +1534,7 @@ func TestDoImportListTreeShowsDependencyGraph(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCmdCachedPackGit(t)
 
 	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
@@ -1763,6 +1778,7 @@ func TestDoImportListWithRigShowsOnlyRigScopedClosure(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCmdCachedPackGit(t)
 
 	writeCityToml(t, dir, `
@@ -1966,6 +1982,7 @@ func TestDoImportWhyExplainsTransitiveImport(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCmdCachedPackGit(t)
 
 	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
@@ -2057,6 +2074,7 @@ func TestDoImportAddRemoteEndToEndLoadsImportedPack(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	repo := initImportBarePackRepo(t, "remote-pack", "v1.2.3", `
 [pack]
@@ -2102,6 +2120,7 @@ func TestDoImportAddRemoteSubpathEndToEndLoadsImportedPack(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	repo := initImportBarePackRepo(t, "mono", "v1.2.3", `
 [pack]
@@ -2163,6 +2182,7 @@ func TestDoImportAddRemoteSHAPinEndToEndLoadsImportedPack(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	repo := initImportBarePackRepo(t, "sha-pack", "", `
 [pack]
@@ -2525,18 +2545,7 @@ name = "demo-pack"
 schema = 1
 `)
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Chdir(%q): %v", dir, err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(cwd); err != nil {
-			t.Fatalf("restore cwd: %v", err)
-		}
-	})
+	t.Chdir(dir)
 
 	prevCityFlag := cityFlag
 	prevRigFlag := rigFlag
@@ -2732,18 +2741,7 @@ name = "demo-pack"
 schema = 1
 `)
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Chdir(%q): %v", dir, err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(cwd); err != nil {
-			t.Fatalf("restore cwd: %v", err)
-		}
-	})
+	t.Chdir(dir)
 
 	prevCityFlag := cityFlag
 	prevRigFlag := rigFlag

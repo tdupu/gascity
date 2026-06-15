@@ -20,6 +20,7 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/emergency"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -62,6 +63,12 @@ type controllerState struct {
 	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 	beadEventStartSeq      uint64
+
+	// emergencyCh receives emergency.Record values from the gc emergency
+	// subsystem. startEmergencyEventRelay drains this channel and mirrors
+	// each record into the city event log as an emergency.signaled event.
+	// Nil when the emergency relay is not configured.
+	emergencyCh chan emergency.Record
 
 	// True after an API config mutation refreshes controller state ahead of the
 	// runtime reload loop. Runtime reloads from older revisions are ignored
@@ -439,12 +446,22 @@ func maintenanceStartupLine(interval time.Duration, active bool) string {
 	return fmt.Sprintf("store-maintenance: loop started interval=%s mode=%s", interval, mode)
 }
 
+// beadCloseAutocloseDispatch controls how convoy/wisp/molecule autoclose are
+// dispatched after a bead.closed event. Default launches a background goroutine
+// (best-effort, non-blocking). Tests swap to a synchronous call for
+// deterministic assertions.
+var beadCloseAutocloseDispatch = func(fn func()) { go fn() }
+
 func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if len(evt.Payload) == 0 {
 		return
 	}
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked(evt)
+	var storeRef string
+	if evt.Type == events.BeadClosed {
+		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
+	}
 	cs.mu.RUnlock()
 
 	for _, store := range stores {
@@ -455,6 +472,47 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if evt.Actor != "cache-reconcile" {
 		cs.Poke()
 	}
+	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
+		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
+	}
+}
+
+// autocloseStoreRefLocked returns the storeRef string for the store that owns
+// beadID. Called under cs.mu read lock.
+func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
+	if cs.cfg == nil {
+		return ""
+	}
+	cityPath := cs.cityPath
+	cityName := loadedCityName(cs.cfg, cityPath)
+	if prefix := config.EffectiveHQPrefix(cs.cfg); prefix != "" && strings.HasPrefix(beadID, prefix+"-") {
+		return workflowStoreRefForDir(cityPath, cityPath, cityName, cs.cfg)
+	}
+	for _, rig := range cs.cfg.Rigs {
+		if prefix := rig.EffectivePrefix(); prefix != "" && strings.HasPrefix(beadID, prefix+"-") {
+			rigPath := rig.Path
+			if !filepath.IsAbs(rigPath) {
+				rigPath = filepath.Join(cityPath, rigPath)
+			}
+			return workflowStoreRefForDir(rigPath, cityPath, cityName, cs.cfg)
+		}
+	}
+	return ""
+}
+
+// runBeadCloseAutoclose dispatches convoy/wisp/molecule autoclose for a closed
+// bead via the controller's store. Replaces the shell on_close hook chain that
+// spawned gc subprocesses per bead write (gastownhall/gascity#3248).
+func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string) {
+	rec := events.Discard
+	if cs.eventProv != nil {
+		rec = cs.eventProv
+	}
+	beadCloseAutocloseDispatch(func() {
+		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
+		doWispAutocloseWith(store, beadID, os.Stderr)
+		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr)
+	})
 }
 
 func (cs *controllerState) beadEventStoresLocked(evt events.Event) []beads.Store {

@@ -25,7 +25,7 @@ schema = 2
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 ```
 
 ```toml
@@ -35,7 +35,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 ```
 
 ```bash
@@ -53,7 +53,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -71,7 +71,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -125,7 +125,7 @@ name = "myproject"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 
 [[rigs.patches]]
 agent = "gastown.refinery"
@@ -213,7 +213,7 @@ them). The **root pack** wires the Gastown import and the default rig binding
 behind it. The **nested pack** holds the reusable defaults — the roles, named
 sessions, and dog pool every Gastown city inherits.
 
-All three are PackV2 (`schema = 2`, `agents/<name>/`).
+All three use the current pack layout (`schema = 2`, `agents/<name>/`).
 
 ### `city.toml` — the deployment
 
@@ -246,16 +246,15 @@ All three are PackV2 (`schema = 2`, `agents/<name>/`).
 name = "gastown"
 provider = "claude"
 global_fragments = ["command-glossary", "operational-awareness"]
-# Builtin packs compose only through explicit includes (gc init writes
-# these; gc doctor --fix repairs them).
-includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
+# Builtin packs (core, bd) compose through explicit pinned imports in
+# pack.toml (gc init writes these; gc doctor --fix repairs them).
 
 [providers.claude]
 base = "builtin:claude"
 
 [defaults.rig.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 
 [daemon]
 patrol_interval = "30s"
@@ -322,7 +321,7 @@ schema = 2
 # bundled copy. The gastown pack is no longer a local directory.
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+version = "sha:4212acb7046c11f6f633df73307006493185233a"
 ```
 
 ### The gastown pack — the reusable defaults

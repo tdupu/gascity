@@ -16,6 +16,7 @@ the rest are task-oriented.
 ## How-to
 
 - [Shareable Packs](/guides/shareable-packs) — create, import, and customize packs across the `pack.toml` / `city.toml` / `.gc/` boundary.
+- [Public Registry Packs](/guides/registry-showcase) — find and import first-party packs from the public Gas City registry.
 - [Gastown on Gas City — Config Recipes](/guides/gastown-config-recipes) — task-oriented config overrides for the Gastown pack: register rigs, scale pools, swap providers, patch agents, and tweak prompts.
 - [Using JSON from the Gas City CLI (`gc`)](/guides/using-json-from-gc) — drive `gc --json` and `gc --json-schema` from scripts, agents, tests, and other software.
 - [Using Gas City as a Multi-Agent Engineering Environment](/guides/multi-agent-engineering-environment) — give a by-hand multi-human, multi-agent workflow a better home by writing the method down once.

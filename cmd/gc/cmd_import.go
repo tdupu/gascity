@@ -124,7 +124,10 @@ entry using source plus optional version. Supported sources are:
 
 Registry catalog handles are lookup shortcuts in this wave, not durable
 [imports.*] field values. After lookup, authored TOML stores the resolved
-source and optional version.`,
+source and optional version.
+
+The [imports.<name>] table key is the local binding name. Imported package
+names are display/advisory metadata and never become registry identity.`,
 		Example: `gc import add ./packs/review
 gc import add https://github.com/org/repo/tree/main/packs/review --version '^1.2.0'
 
@@ -280,6 +283,9 @@ func resolveImportRoot() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
+	}
+	if canonical, err2 := filepath.EvalSymlinks(cwd); err2 == nil {
+		cwd = canonical
 	}
 	// Explicit rig/dir signals carry user intent and outrank cwd inference:
 	// route them through the registered-city machinery first, exactly as

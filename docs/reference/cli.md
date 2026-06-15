@@ -57,7 +57,6 @@ gc [flags]
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
-| [gc registry](#gc-registry) | Publish packs to Gas City Registry |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
@@ -1147,7 +1146,7 @@ requirements (deprecated contract = "graph.v2" opt-ins, missing
 the host's [daemon] formula_v2 setting cannot satisfy), v2 config
 deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
-PackV1-to-PackV2 rewrites that are available on this branch.
+legacy-to-current pack rewrites that are available on this branch.
 
 ```
 gc doctor [flags]
@@ -1656,6 +1655,9 @@ Registry catalog handles are lookup shortcuts in this wave, not durable
 [imports.*] field values. After lookup, authored TOML stores the resolved
 source and optional version.
 
+The [imports.&lt;name&gt;] table key is the local binding name. Imported package
+names are display/advisory metadata and never become registry identity.
+
 ```
 gc import add <source> [flags]
 ```
@@ -1777,10 +1779,10 @@ Create a new Gas City workspace in the given directory (or cwd).
 
 Runs an interactive wizard to choose a config template and coding agent
 provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
-the standard top-level directories, and .template.md prompt templates, then
-materializes builtin packs under .gc/system/packs. Use --template with
---default-provider to create a city non-interactively, or --file to initialize
-from an existing TOML config file.
+the standard top-level directories, and .template.md prompt templates, and
+pins the builtin pack imports (resolved from the user-global pack cache).
+Use --template with --default-provider to create a city non-interactively,
+or --file to initialize from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
@@ -1813,10 +1815,11 @@ gc init --file city.toml --preserve-existing .
 | `--from` | string |  | path to an example city directory to copy |
 | `--json` | bool |  | emit JSON summary |
 | `--name` | string |  | workspace name (default: target directory basename) |
+| `--no-start` | bool |  | initialize files and imports without registering or starting the city |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
-| `--template` | string |  | non-interactive template to write: minimal, gastown, or custom |
+| `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, or custom |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
 ## gc lint
@@ -2392,10 +2395,13 @@ gc pack registry
 |------------|-------------|
 | [gc pack registry add](#gc-pack-registry-add) | Add a pack registry |
 | [gc pack registry list](#gc-pack-registry-list) | List configured pack registries |
+| [gc pack registry login](#gc-pack-registry-login) | Log in to Gas City Registry |
+| [gc pack registry publish](#gc-pack-registry-publish) | Submit a pack publish request |
 | [gc pack registry refresh](#gc-pack-registry-refresh) | Refresh cached pack registry catalogs |
 | [gc pack registry remove](#gc-pack-registry-remove) | Remove a pack registry |
 | [gc pack registry search](#gc-pack-registry-search) | Search cached pack registry catalogs |
 | [gc pack registry show](#gc-pack-registry-show) | Show one pack registry entry |
+| [gc pack registry whoami](#gc-pack-registry-whoami) | Show the authenticated registry account |
 
 ## gc pack registry add
 
@@ -2421,6 +2427,53 @@ gc pack registry list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
+
+## gc pack registry login
+
+Log in to Gas City Registry and store a local API token.
+
+By default this opens a browser for GitHub or Google Workspace sign-in. Use
+--device for headless shells, or --token to store an existing registry token.
+
+```
+gc pack registry login [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--device` | bool |  | use device-code login instead of browser callback login |
+| `--label` | string | `GC CLI login` | label for the registry API token |
+| `--no-browser` | bool |  | print the browser login URL instead of opening it |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--timeout` | duration | `15m0s` | maximum time to wait for interactive login |
+| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
+
+## gc pack registry publish
+
+Submit a pack publish request to Gas City Registry.
+
+The command requires a clean Git checkout whose current HEAD matches its
+configured upstream branch, then submits the GitHub repository, commit, pack
+path, pack name, and version to the registry API.
+
+```
+gc pack registry publish <path-to-pack-root> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--csrf-token` | string |  | registry CSRF token; defaults to GC_REGISTRY_CSRF_TOKEN |
+| `--description` | string |  | release description; defaults to [pack].description |
+| `--dev-auth` | bool |  | create a local dev-auth session before submitting; localhost only |
+| `--dev-auth-handle` | string | `local-cli` | dev-auth handle when --dev-auth is used |
+| `--dry-run` | bool |  | print the publish request without submitting |
+| `--name` | string |  | registry pack name; defaults to [pack].name |
+| `--ref` | string |  | release ref label; defaults to the upstream branch name |
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--session-cookie` | string |  | registry_session cookie value or Cookie header; defaults to GC_REGISTRY_SESSION |
+| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
+| `--validate` | bool | `true` | ask the registry to validate the request immediately; a rejected validation exits non-zero |
+| `--version` | string |  | release version; defaults to [pack].version |
 
 ## gc pack registry refresh
 
@@ -2474,6 +2527,19 @@ gc pack registry show <pack-name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 | `--refresh` | bool |  | refresh catalogs before showing |
+
+## gc pack registry whoami
+
+Show the authenticated registry account
+
+```
+gc pack registry whoami [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
+| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN or stored login |
 
 ## gc pack release
 
@@ -2630,7 +2696,7 @@ Baseline:
   baseline so the LLM iterates on a known-good shape rather than
   designing from scratch. Resolution priority:
     1. &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md     (user customization)
-    2. &lt;city&gt;/.gc/system/packs/*/agents/&lt;role&gt;/    (pack default)
+    2. &lt;composed pack dirs&gt;/agents/&lt;role&gt;/         (pack default)
     3. embedded prompts/&lt;role&gt;.md                  (built-in fallback)
     4. embedded prompts/mayor.md                   (structural reference,
                                                      used only when no
@@ -2699,80 +2765,6 @@ gc register [path] [flags]
 | `--json` | bool |  | emit JSONL summary |
 | `--name` | string |  | machine-local alias for this city registration |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
-
-## gc registry
-
-Publish packs to the hosted Gas City Registry.
-
-```
-gc registry
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| [gc registry login](#gc-registry-login) | Log in to Gas City Registry |
-| [gc registry publish](#gc-registry-publish) | Submit a pack publish request |
-| [gc registry whoami](#gc-registry-whoami) | Show the authenticated registry account |
-
-## gc registry login
-
-Log in to Gas City Registry and store a local API token.
-
-By default this opens a browser for GitHub or Google Workspace sign-in. Use
---device for headless shells, or --token to store an existing registry token.
-
-```
-gc registry login [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--device` | bool |  | use device-code login instead of browser callback login |
-| `--label` | string | `GC CLI login` | label for the registry API token |
-| `--no-browser` | bool |  | print the browser login URL instead of opening it |
-| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
-| `--timeout` | duration | `15m0s` | maximum time to wait for interactive login |
-| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
-
-## gc registry publish
-
-Submit a pack publish request to Gas City Registry.
-
-The command requires a clean Git checkout whose current HEAD matches its
-configured upstream branch, then submits the GitHub repository, commit, pack
-path, pack name, and version to the registry API.
-
-```
-gc registry publish <path-to-pack-root> [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--csrf-token` | string |  | registry CSRF token; defaults to GC_REGISTRY_CSRF_TOKEN |
-| `--description` | string |  | release description; defaults to [pack].description |
-| `--dev-auth` | bool |  | create a local dev-auth session before submitting; localhost only |
-| `--dev-auth-handle` | string | `local-cli` | dev-auth handle when --dev-auth is used |
-| `--dry-run` | bool |  | print the publish request without submitting |
-| `--name` | string |  | registry pack name; defaults to [pack].name |
-| `--ref` | string |  | release ref label; defaults to the upstream branch name |
-| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
-| `--session-cookie` | string |  | registry_session cookie value or Cookie header; defaults to GC_REGISTRY_SESSION |
-| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN |
-| `--validate` | bool | `true` | ask the registry to validate the request immediately; a rejected validation exits non-zero |
-| `--version` | string |  | release version; defaults to [pack].version |
-
-## gc registry whoami
-
-Show the authenticated registry account
-
-```
-gc registry whoami [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
-| `--token` | string |  | registry API token; defaults to GC_REGISTRY_TOKEN or stored login |
 
 ## gc reload
 

@@ -172,8 +172,10 @@ pack.
 
 ## Names
 
-Agent names are local names inside the pack that defines them. When a pack is
-imported, the import binding becomes part of the runtime agent name.
+Agent names are local names inside the pack that defines them. Import bindings
+are local names chosen by the importing file. When a pack is imported, the
+import binding becomes the runtime namespace for imported agent names; the
+imported pack's own name does not override that binding.
 
 If a city imports this dependency:
 
@@ -359,7 +361,38 @@ state.
 | Refresh cached catalog records | `gc pack registry refresh` |
 | Search for a reusable pack | `gc pack registry search` |
 | Inspect a registry record | `gc pack registry show` |
+| Submit a pack publish request | `gc pack registry publish <path>` |
 | Share a chosen dependency with the team | `[imports.<binding>]` in checked-in TOML |
 | Install or repair authored imports | `gc import install` |
 | Check installed import state without mutating | `gc import check` |
 | Validate the composed city | `gc config show --validate` |
+
+This separation keeps local discovery flexible without making shared config
+depend on the names or cache layout of one machine.
+
+### Registry Freshness
+
+Registry catalogs are cached locally. `gc pack registry search` and
+`gc pack registry show` read that cache unless you pass `--refresh`, and they
+warn when a configured registry cache is older than the freshness window.
+
+By default, a registry cache is considered fresh for 24 hours. Set
+`GC_REGISTRY_FRESHNESS` to a positive Go duration string when you need a
+different window:
+
+```bash
+GC_REGISTRY_FRESHNESS=1h gc pack registry search gascity
+```
+
+Invalid, zero, or negative values produce a warning and leave the command
+without a custom freshness window. Use `--refresh` when you want a command to
+fetch the latest catalog before reading it:
+
+```bash
+gc pack registry search gascity --refresh
+gc pack registry show main:gascity --refresh
+```
+
+Freshness affects discovery, not authored imports. A stale registry cache can
+hide a newly published pack record from search/show output, but shared
+`pack.toml` still stores durable import `source` and `version` values.

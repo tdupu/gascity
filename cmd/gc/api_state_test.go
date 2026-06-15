@@ -452,9 +452,10 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 	cityDir := shortSocketTempDir(t, "gc-state-runtime-builtin-")
 	cleanupManagedDoltTestCity(t, cityDir)
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\nincludes = [\".gc/system/packs/core\", \".gc/system/packs/bd\"]\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"+builtinImportsTOML("core", "bd")), 0o644); err != nil {
 		t.Fatalf("write initial city.toml: %v", err)
 	}
+	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 
 	initial, err := tryReloadConfig(tomlPath, "test", cityDir)
 	if err != nil {
@@ -464,7 +465,7 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 	cs := newControllerState(context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
 
 	rigDir := t.TempDir()
-	updatedToml := fmt.Sprintf("[workspace]\nname = \"test\"\nincludes = [\".gc/system/packs/core\", \".gc/system/packs/bd\"]\n\n[[rigs]]\nname = \"alpha\"\npath = %q\n", rigDir)
+	updatedToml := fmt.Sprintf("[workspace]\nname = \"test\"\n\n[[rigs]]\nname = \"alpha\"\npath = %q\n", rigDir) + builtinImportsTOML("core", "bd")
 	if err := os.WriteFile(tomlPath, []byte(updatedToml), 0o644); err != nil {
 		t.Fatalf("write updated city.toml: %v", err)
 	}
@@ -490,9 +491,10 @@ func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *tes
 	cityDir := shortSocketTempDir(t, "gc-state-mutation-builtin-")
 	cleanupManagedDoltTestCity(t, cityDir)
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\nincludes = [\".gc/system/packs/core\", \".gc/system/packs/bd\"]\n"), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"+builtinImportsTOML("core", "bd")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
+	writeBuiltinImportsLock(t, cityDir, "core", "bd")
 
 	initial, err := tryReloadConfig(tomlPath, "test", cityDir)
 	if err != nil {
@@ -3822,5 +3824,80 @@ func TestControllerStateSuspendRestoresSymlinkedAgentTomlTargetWhenRefreshFails(
 	}
 	if cs.configDirty.Load() {
 		t.Fatal("SuspendAgent should not mark config dirty after rollback")
+	}
+}
+
+// TestApplyBeadEventToStoresTriggersConvoyAutoclose verifies that a
+// bead.closed event processed by the controller triggers convoy autoclose via
+// the in-process path, without spawning a gc subprocess.
+func TestApplyBeadEventToStoresTriggersConvoyAutoclose(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() } // synchronous in tests
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	backing := beads.NewMemStore()
+	// gc-1: convoy, gc-2 and gc-3 are child members tracked by the convoy
+	convoy, err := backing.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create convoy: %v", err)
+	}
+	childA, err := backing.Create(beads.Bead{Title: "task A", ParentID: convoy.ID})
+	if err != nil {
+		t.Fatalf("Create childA: %v", err)
+	}
+	childB, err := backing.Create(beads.Bead{Title: "task B", ParentID: convoy.ID})
+	if err != nil {
+		t.Fatalf("Create childB: %v", err)
+	}
+
+	// Close childA first; convoy still has an open child.
+	if err := backing.Close(childA.ID); err != nil {
+		t.Fatalf("Close childA: %v", err)
+	}
+
+	// Prime the CachingStore so it knows about all beads.
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// Close childB in the backing store only (simulates an agent bd close).
+	if err := backing.Close(childB.ID); err != nil {
+		t.Fatalf("Close childB: %v", err)
+	}
+	// Update the cache to reflect the close (normally done by the event watcher).
+	if err := cached.Update(childB.ID, beads.UpdateOpts{Status: stringPtr("closed")}); err != nil {
+		t.Fatalf("Update childB in cache: %v", err)
+	}
+
+	closedPayload, err := json.Marshal(beads.Bead{
+		ID:     childB.ID,
+		Title:  "task B",
+		Status: "closed",
+		Type:   "task",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	cs := &controllerState{
+		beadStores: map[string]beads.Store{"test": cached},
+		pokeCh:     make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadClosed,
+		Actor:   "agent",
+		Subject: childB.ID,
+		Payload: closedPayload,
+	})
+
+	// Convoy should now be auto-closed since all children are terminal.
+	got, err := backing.Get(convoy.ID)
+	if err != nil {
+		t.Fatalf("Get convoy: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("convoy status = %q after all children closed, want %q", got.Status, "closed")
 	}
 }

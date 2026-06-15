@@ -94,9 +94,11 @@ mol-scoped-work
 pancakes
 ```
 
-The `mol-*` entries are built-ins from the bundled core and dolt packs (worker
-scaffolds, review workflows, Dolt health-patrol). That set may grow as new
-built-ins land; `pancakes` is the one you just defined.
+The `mol-*` entries are built-ins from the explicit imports `gc init` wrote —
+the bundled `core` and `bd`/`dolt` system packs plus the default `gascity`
+methodology pack (worker scaffolds, Dolt maintenance, and planning or
+implementation workflows). The set may grow as pack releases change;
+`pancakes` is the one you just defined.
 
 To see the compiled recipe for a specific formula:
 

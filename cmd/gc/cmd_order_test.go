@@ -369,6 +369,7 @@ schedule = "*/5 * * * *"
 func TestScanAllOrdersRemoteImportedFlatPackOrders(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cityDir := t.TempDir()
 	source := "https://github.com/example/orders-pack.git"
@@ -933,6 +934,32 @@ func TestOrderRun(t *testing.T) {
 	}
 	if got := results[0].Metadata["gc.routed_to"]; got != "dog" {
 		t.Fatalf("gc.routed_to = %q, want dog", got)
+	}
+}
+
+func TestOrderRunFormulaRecordsTrackingBead(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	if code := doOrderRun(aa, "digest", "", "/city", store, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	tracking, err := store.ListByLabel(labelOrderTracking, 0, beads.IncludeClosed, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(%s): %v", labelOrderTracking, err)
+	}
+	if len(tracking) != 1 {
+		t.Fatalf("order-tracking beads = %d, want 1 (%#v)", len(tracking), tracking)
+	}
+	if !beadLabelsContain(tracking[0].Labels, "order-run:digest") {
+		t.Fatalf("tracking bead labels = %v, want order-run:digest", tracking[0].Labels)
+	}
+	if tracking[0].Status != "closed" {
+		t.Fatalf("tracking bead status = %q, want closed", tracking[0].Status)
 	}
 }
 

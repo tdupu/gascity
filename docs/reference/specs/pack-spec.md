@@ -1,5 +1,5 @@
 ---
-title: Gas City 1.0 Pack System (PackV2)
+title: Gas City Pack Specification
 description: Authoritative specification for Gas City pack format and loading semantics.
 ---
 
@@ -11,9 +11,9 @@ description: Authoritative specification for Gas City pack format and loading se
 | Primary implementation | `internal/config/pack.go`, `internal/config/config.go`, `internal/config/compose.go` |
 | User-facing guide | `docs/guides/shareable-packs.md` |
 
-This document specifies the Gas City 1.0 pack system as a data model, file
-format, and loading process. **PackV2** is a shorthand name for the Gas City Pack
-Specification (2.0), but this document uses "pack" for the authoring surface.
+This document specifies the Gas City pack system as a data model, file format,
+and loading process. The current pack schema is `2`; this document uses "pack"
+for the authoring surface.
 
 The key words "must", "must not", "required", "shall", "shall not", "should",
 "should not", and "may" are to be interpreted as normative requirements unless
@@ -68,7 +68,10 @@ constraints and lockfile resolution, not by a loader comparing `[pack].version`
 directly.
 
 The `requires_gc` field is optional metadata for the minimum compatible `gc`
-version. It is parsed as pack metadata.
+version. It is parsed and preserved as pack metadata. The current loader,
+importer, and doctor surfaces do not enforce the constraint during load,
+import, or validation; enforcement must be introduced by an explicit future
+implementation change before pack authors can rely on it as a hard gate.
 
 ### 0.3. Pack Contents
 
@@ -207,7 +210,7 @@ requires_gc = ">=0.13.0"
 | `name` | string | yes | Pack identifier and provenance label. Must not be empty. |
 | `schema` | integer | yes | Pack format version. Must be `2` for this specification. |
 | `version` | string | no | Pack version metadata. |
-| `requires_gc` | string | no | Minimum compatible `gc` version metadata. |
+| `requires_gc` | string | no | Minimum compatible `gc` version metadata. Parsed and preserved; not currently enforced during load/import/doctor. |
 | `description` | string | no | Human-readable pack summary. |
 | `requires` | array of tables | no | Agent requirements validated after expansion. |
 
@@ -246,6 +249,11 @@ The binding name is local to the importing file. Current loader behavior uses
 binding names for deterministic ordering of imports and stamps the binding on
 every agent the import contributes, qualifying runtime agent identities
 (section 2.5).
+
+The imported pack's declared name and any registry display name are advisory:
+they can suggest a binding or provide UI copy, but they are not durable pack
+identity. Durable identity comes from `source` plus the optional `version`
+constraint or pin.
 
 A `source` string is a pack resolver coordinate. For GitHub-hosted packs, a
 browser-dereferenceable `tree/<ref>/<path>` URL is the preferred authored form.
@@ -753,7 +761,7 @@ top-level `[imports.<binding>]` in `pack.toml`.
 
 > **Compatibility:** Legacy `includes` lists in `pack.toml` may also feed the
 > pack loader. New packs should use `[imports.<binding>]`. Schema-2 root
-> `city.toml` files and schema-2 config fragments reject legacy PackV1 surfaces
+> `city.toml` files and schema-2 config fragments reject legacy pack surfaces
 > such as `workspace.includes`, `workspace.default_rig_includes`, `[packs.*]`,
 > `rigs.includes`, and inline agent definitions.
 
@@ -770,9 +778,10 @@ version selection, cache population, and lockfile update occur before or around
 loading. They must produce a concrete pack root directory whose `pack.toml` can
 be loaded by this specification.
 
-The `gc pack` command surface is registry discovery and local registry
-configuration: `gc pack registry add`, `list`, `remove`, `refresh`, `search`,
-and `show`.
+The `gc pack` command surface is registry discovery, local registry
+configuration, authentication, and publish submission: `gc pack registry add`,
+`list`, `remove`, `refresh`, `search`, `show`, `login`, `whoami`, and
+`publish`.
 
 Registry handles are not durable dependency coordinates. The shipped registry
 commands may accept a handle such as `main:gascity` while searching or
@@ -1022,7 +1031,7 @@ The loader must fail when:
 12. Two or more agents from different source directories share a qualified
     name on the same surface.
 13. A declared pack requirement is not satisfied.
-14. A schema-2 `city.toml` or included fragment uses a removed PackV1 surface such as `rigs.includes`, `[packs.*]`, `workspace.includes`, `workspace.default_rig_includes`, or inline agent definitions. Exception: canonical builtin system-pack includes (`.gc/system/packs/<name>` entries written by `gc init`) remain supported in `workspace.includes`.
+14. A schema-2 `city.toml` or included fragment uses a removed PackV1 surface such as `rigs.includes`, `[packs.*]`, `workspace.includes`, `workspace.default_rig_includes`, or inline agent definitions. Exception: legacy builtin system-pack includes (`.gc/system/packs/<name>` entries written by older `gc init` versions) are tolerated during migration; the `builtin-pack-imports` doctor check converts them to pinned `[imports]` entries.
 
 The loader may skip missing remote pack subpaths in compatibility cases where a
 remote source was fetched but the referenced pack directory no longer exists.
