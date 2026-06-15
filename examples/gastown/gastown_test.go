@@ -483,6 +483,46 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	)
 }
 
+// TestRefineryFormulaDirectMergeUsesDetachedWorktree guards the RC-blocking
+// regression where the refinery tried `git checkout $TARGET` in its active
+// worktree while the target branch was already checked out by the rig's main
+// worktree. That checkout failed, but the agent still wrote merged metadata
+// and closed the bead. Direct merges must use a temporary detached worktree,
+// verify origin/<target> reaches the merged SHA, and only then mutate bead
+// state.
+func TestRefineryFormulaDirectMergeUsesDetachedWorktree(t *testing.T) {
+	body := refineryMergePushDescription(t)
+	direct := sectionBetween(t, body,
+		`**If MERGE_STRATEGY = "direct" (default):**`,
+		`**If MERGE_STRATEGY = "mr":**`,
+	)
+
+	for _, line := range strings.Split(direct, "\n") {
+		if strings.TrimSpace(line) == `git checkout $TARGET` {
+			t.Fatalf("direct refinery merge checks out target branch in active worktree:\n%s", direct)
+		}
+	}
+
+	assertContainsInOrder(t, direct,
+		`branch_has_real_change "origin/$TARGET" temp ||`,
+		"set -e",
+		`MERGE_PARENT=$(mktemp -d "${TMPDIR:-/tmp}/gascity-refinery-merge.XXXXXX")`,
+		`git fetch origin "+refs/heads/${TARGET}:refs/remotes/origin/${TARGET}"`,
+		`TEMP_SHA=$(git rev-parse temp)`,
+		`git worktree add --detach "$MERGE_WT" "origin/$TARGET"`,
+		`git -C "$MERGE_WT" merge --ff-only "$TEMP_SHA"`,
+		`MERGED_SHA=$(git -C "$MERGE_WT" rev-parse HEAD)`,
+		`git -C "$MERGE_WT" push origin "HEAD:$TARGET"`,
+		`REMOTE=$(git rev-parse "origin/$TARGET")`,
+		`if [ "$MERGED_SHA" != "$REMOTE" ]; then`,
+		"STOP. Do not mutate bead state.",
+		"gc runtime drain-ack",
+		"exit 1",
+		"--set-metadata merge_result=merged",
+		`gc bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"`,
+	)
+}
+
 // TestRefineryFormulaRefusesZeroDiffMerge guards the false-completion
 // fix (gco-hu0p / upstream #3048): nothing previously stopped the refinery
 // from recording a 0-commit / no-diff branch as close-as-merged, producing
