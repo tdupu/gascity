@@ -397,7 +397,7 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		return GraphRouteBinding{}, fmt.Errorf("ResolveAgent not configured")
 	}
 	if target.fromAssignee {
-		if binding, ok, err := resolveGraphDirectSessionBinding(store, cityName, cfg, target.value, rigContext, deps); err != nil {
+		if binding, ok, err := ResolveGraphDirectSessionBinding(store, cityName, cfg, target.value, rigContext, deps); err != nil {
 			return GraphRouteBinding{}, fmt.Errorf("step %s: %w", stepID, err)
 		} else if ok {
 			cache[stepID] = binding
@@ -424,7 +424,14 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	return binding, nil
 }
 
-func resolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *config.City, target, rigContext string, deps Deps) (GraphRouteBinding, bool, error) {
+// ResolveGraphDirectSessionBinding resolves a direct-session route target to a
+// concrete session bead, returning ok=false when the target is not a
+// direct-session reference (so the caller can fall back to config-agent
+// routing). Exact session bead IDs win over config target names; config-named
+// sessions are materialized through deps.DirectSessionResolver. This is the
+// canonical implementation shared by the graphroute library path and the CLI
+// projection in cmd/gc.
+func ResolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *config.City, target, rigContext string, deps Deps) (GraphRouteBinding, bool, error) {
 	target = strings.TrimSpace(target)
 	if store == nil || target == "" {
 		return GraphRouteBinding{}, false, nil

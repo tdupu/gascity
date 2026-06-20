@@ -2437,6 +2437,11 @@ func expandCityImportedAgentsForRigs(agents []Agent, rigs []Rig, bindingName str
 				continue
 			}
 			a.Dir = rigName
+			// Clone DependsOn before qualifying in place: the range copy shares
+			// the original slice's backing array, so an in-place rewrite would
+			// poison the city-scoped copies filtered afterward and lock the
+			// first rig's prefix onto every later rig.
+			a.DependsOn = append([]string(nil), a.DependsOn...)
 			qualifyAgentDependsOnInPlace(&a)
 			expanded = append(expanded, a)
 		}

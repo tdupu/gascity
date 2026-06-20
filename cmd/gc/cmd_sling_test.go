@@ -4876,12 +4876,12 @@ func TestResolveGraphDirectSessionBindingMaterializesNamedSessionAliasShadow(t *
 		}},
 	}
 
-	binding, ok, err := resolveGraphDirectSessionBinding(store, cfg.Workspace.Name, t.TempDir(), cfg, "claude", "")
+	binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cfg.Workspace.Name, cfg, "claude", "", cliGraphrouteDeps(t.TempDir()))
 	if err != nil {
-		t.Fatalf("resolveGraphDirectSessionBinding: %v", err)
+		t.Fatalf("ResolveGraphDirectSessionBinding: %v", err)
 	}
 	if !ok || binding.DirectSessionID == "" {
-		t.Fatalf("resolveGraphDirectSessionBinding did not materialize named-session alias shadow: binding=%+v ok=%v", binding, ok)
+		t.Fatalf("ResolveGraphDirectSessionBinding did not materialize named-session alias shadow: binding=%+v ok=%v", binding, ok)
 	}
 	bead, err := store.Get(binding.DirectSessionID)
 	if err != nil {
