@@ -36,7 +36,11 @@ import (
 // golden test), so a downstream consumer pinned to an older version rejects the
 // batch loudly (ValidateBatch -> ErrSchemaMismatch) instead of mis-handling it.
 // A pure refactor that leaves bytes and policy identical does NOT bump.
-const SchemaVersion = 1
+//
+// v2 replaced the cleartext city_id with a salted, non-reversible city_hash so
+// an operator-chosen city name (which can itself embed a customer/org
+// identifier) no longer leaves the box.
+const SchemaVersion = 2
 
 // Profile selects the redaction profile. There is exactly one today; it is part
 // of the public API so Validate can stay profile-aware as profiles are added
@@ -129,9 +133,11 @@ type Envelope struct {
 	SessionID string `json:"session_id,omitempty"` // opaque session correlation id (safeRef-gated)
 }
 
-// Batch is one POST body: the events for a single city.
+// Batch is one POST body: the events for a single city. CityHash is a salted,
+// non-reversible partition key (see CityHash); the cleartext city name never
+// crosses the wire.
 type Batch struct {
-	CityID        string     `json:"city_id"`
+	CityHash      string     `json:"city_hash"`
 	SchemaVersion int        `json:"schema_version"`
 	Events        []Envelope `json:"events"`
 }
@@ -157,6 +163,22 @@ func ActorHash(salt []byte, actor string) string {
 	h.Write(salt)
 	h.Write([]byte(":"))
 	h.Write([]byte(actor))
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// CityHash returns a salted, non-reversible, 16-hex partition key for a city
+// name. Like ActorHash, it lets the receiver group batches per city without the
+// cleartext city name — operator-chosen, and able to embed a customer/org
+// identifier — ever leaving the box. It is domain-separated from ActorHash so a
+// city and an actor that share a name do not hash alike.
+func CityHash(salt []byte, city string) string {
+	if city == "" {
+		return ""
+	}
+	h := sha256.New()
+	h.Write(salt)
+	h.Write([]byte(":city:"))
+	h.Write([]byte(city))
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
@@ -268,12 +290,18 @@ func Validate(env Envelope, opt Options) error {
 var ErrSchemaMismatch = errors.New("eventexport: batch schema_version mismatch")
 
 // ValidateBatch checks a received batch end to end: its schema_version must equal
-// SchemaVersion (else it returns an error wrapping ErrSchemaMismatch), then every
+// SchemaVersion (else it returns an error wrapping ErrSchemaMismatch), its
+// city_hash must be the opaque 16-hex partition-key shape that schema v2 promises
+// (rejecting empty, cleartext, or otherwise malformed values at the receiver trust
+// boundary, the same shape gate ValidateEnvelope applies to actor_hash), then every
 // envelope must pass ValidateEnvelope. Validation is fail-fast: it returns the
 // FIRST failure with its row index, not an aggregate of all failures.
 func ValidateBatch(b Batch) error {
 	if b.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("eventexport: batch schema_version %d != %d: %w", b.SchemaVersion, SchemaVersion, ErrSchemaMismatch)
+	}
+	if !isHex16(b.CityHash) {
+		return fmt.Errorf("eventexport: city_hash %q must be 16 hex chars", b.CityHash)
 	}
 	for i, env := range b.Events {
 		if err := ValidateEnvelope(env); err != nil {
@@ -314,7 +342,7 @@ func safeRef(s string) string {
 }
 
 // isHex16 reports whether s is exactly 16 lowercase hex characters (the
-// ActorHash shape).
+// ActorHash and CityHash shape).
 func isHex16(s string) bool {
 	if len(s) != 16 {
 		return false
