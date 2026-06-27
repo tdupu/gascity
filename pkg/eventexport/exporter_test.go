@@ -258,7 +258,7 @@ func TestExporter_EmitCorrelation(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() { _ = exp.Run(ctx, src); close(done) }()
-		src.ch <- TaggedEvent{City: "c1", Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "ctl", Subject: "mc-1", RunID: "wf-root-abc", SessionID: "sess-9f2a"}
+		src.ch <- TaggedEvent{City: "c1", Seq: 1, Type: "bead.closed", Ts: fixedTS, Actor: "ctl", Subject: "mc-1", RunID: "wf-root-abc", SessionID: "sess-9f2a", StepID: "mc-step-7"}
 		waitFor(t, 2*time.Second, func() bool { return exp.Cursors()["c1"] == 1 })
 		cancel()
 		<-done
@@ -266,16 +266,19 @@ func TestExporter_EmitCorrelation(t *testing.T) {
 		if len(all) == 0 || len(all[0].Events) == 0 {
 			t.Fatalf("expected at least one exported event")
 		}
-		// schema_version must stay 1 regardless of correlation emission.
-		if all[0].SchemaVersion != 1 {
-			t.Fatalf("schema_version = %d, want 1 (emitting run/session is v1-compatible)", all[0].SchemaVersion)
+		// Emitting run/session correlation is version-neutral: it must not change
+		// the batch schema_version away from the package's current SchemaVersion.
+		// Assert the const, not a literal, so a legitimate wire bump (e.g. the v2
+		// city_id->city_hash change in #3678) doesn't falsely fail this guard.
+		if all[0].SchemaVersion != SchemaVersion {
+			t.Fatalf("schema_version = %d, want %d (emitting run/session is version-neutral)", all[0].SchemaVersion, SchemaVersion)
 		}
 		return all[0]
 	}
 
 	on := run(true)
-	if on.Events[0].RunID != "wf-root-abc" || on.Events[0].SessionID != "sess-9f2a" {
-		t.Fatalf("EmitCorrelation=true must carry run/session, got %+v", on.Events[0])
+	if on.Events[0].RunID != "wf-root-abc" || on.Events[0].SessionID != "sess-9f2a" || on.Events[0].StepID != "mc-step-7" {
+		t.Fatalf("EmitCorrelation=true must carry run/session/step, got %+v", on.Events[0])
 	}
 	// Headline invariant: a v1-pinned receiver accepts the populated batch with no
 	// schema mismatch — emitting run/session is v1-compatible (no flag day).
@@ -284,8 +287,8 @@ func TestExporter_EmitCorrelation(t *testing.T) {
 	}
 
 	off := run(false)
-	if off.Events[0].RunID != "" || off.Events[0].SessionID != "" {
-		t.Fatalf("EmitCorrelation=false must drop run/session, got %+v", off.Events[0])
+	if off.Events[0].RunID != "" || off.Events[0].SessionID != "" || off.Events[0].StepID != "" {
+		t.Fatalf("EmitCorrelation=false must drop run/session/step, got %+v", off.Events[0])
 	}
 }
 

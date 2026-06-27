@@ -49,6 +49,7 @@ const (
 	CityPathMetadataKey                  = "gc.city_path"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
+	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
 	ControlForMetadataKey                = "gc.control_for"
 	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
@@ -120,13 +121,13 @@ const (
 	OutcomeMetadataKey                   = "gc.outcome"
 	OutputJSONMetadataKey                = "gc.output_json"
 	OutputJSONRequiredMetadataKey        = "gc.output_json_required"
-	PRURLMetadataKey                     = "gc.pr_url"
 	ParentConvoyIDMetadataKey            = "gc.parent_convoy_id"
 	PartialFragmentMetadataKey           = "gc.partial_fragment"
 	PartialRetryMetadataKey              = "gc.partial_retry"
+	PackMetadataKey                      = "gc.pack"
+	PackRootMetadataKey                  = "gc.pack_root"
+	PackWorkspaceMetadataKey             = "gc.pack_workspace"
 	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
-	PhaseHistoryMetadataKey              = "gc.phase_history"
-	PhaseMetadataKey                     = "gc.phase"
 	RalphStepIDMetadataKey               = "gc.ralph_step_id"
 	ReasoningMetadataKey                 = "gc.reasoning"
 	RequiredArtifactMetadataKey          = "gc.required_artifact"
@@ -160,12 +161,11 @@ const (
 	StepTimeoutMetadataKey               = "gc.step_timeout"
 	SyntheticKindMetadataKey             = "gc.synthetic_kind"
 	SyntheticMetadataKey                 = "gc.synthetic"
-	TallyModeMetadataKey                 = "gc.tally_mode"
-	TallyResultMetadataKey               = "gc.tally_result"
 	TemplateMetadataKey                  = "gc.template"
 	TerminalMetadataKey                  = "gc.terminal"
+	TriggerBeadIDMetadataKey             = "gc.trigger_bead_id"
+	TriggerBeadStoreRefMetadataKey       = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey                 = "gc.truncated"
-	VoteFieldMetadataKey                 = "gc.vote_field"
 	WorkBranchMetadataKey                = "gc.work_branch"
 	WorkCommitMetadataKey                = "gc.work_commit"
 	WorkDirMetadataKey                   = "gc.work_dir"
@@ -221,6 +221,15 @@ const (
 	// meanings; reads still fall back to it on session beads.
 	LegacyWorkDirMetadataKey = "work_dir"
 )
+
+// OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
+// which provider option choices are stored as opt_<OptionsSchema key> (e.g.
+// opt_model, opt_effort) on session and work beads. The suffix is open-world
+// (a pack-authored OptionsSchema key), so it is declared as a prefix, not
+// enumerated — the non-gc sibling of FormulaVarPrefix. Like the directory
+// keys above, it is not in KnownMetadataPrefixes because the drift guard's
+// key-shape rule only covers the gc. namespace.
+const OptionMetadataPrefix = "opt_"
 
 // KnownMetadataKeys lists every engine-owned bead-metadata key this package
 // declares. The guard test asserts every gc.* metadata literal used in non-test
@@ -307,13 +316,13 @@ var KnownMetadataKeys = []string{
 	OutcomeMetadataKey,
 	OutputJSONMetadataKey,
 	OutputJSONRequiredMetadataKey,
-	PRURLMetadataKey,
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,
 	PartialRetryMetadataKey,
+	PackMetadataKey,
+	PackRootMetadataKey,
+	PackWorkspaceMetadataKey,
 	PerDispatchModelMetadataKey,
-	PhaseHistoryMetadataKey,
-	PhaseMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
@@ -347,12 +356,11 @@ var KnownMetadataKeys = []string{
 	StepTimeoutMetadataKey,
 	SyntheticKindMetadataKey,
 	SyntheticMetadataKey,
-	TallyModeMetadataKey,
-	TallyResultMetadataKey,
 	TemplateMetadataKey,
 	TerminalMetadataKey,
+	TriggerBeadIDMetadataKey,
+	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
-	VoteFieldMetadataKey,
 	WorkBranchMetadataKey,
 	WorkCommitMetadataKey,
 	WorkDirMetadataKey,

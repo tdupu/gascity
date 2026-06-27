@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -900,32 +901,26 @@ func buildPreparedStartWithWorkDirResolver(
 			agentCfg.Env[startupPromptDeliveredEnv] = "1"
 		}
 	}
-	// Initial message: append to prompt on first start only.
+	// Initial message: append to prompt on first start only, reusing the
+	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
 	// Schema overrides were already applied in the block above (before coreHash).
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
 	// flags, so the overrides don't need to be re-applied.
-	if raw := session.Metadata["template_overrides"]; raw != "" {
-		var overrides map[string]string
-		if err := json.Unmarshal([]byte(raw), &overrides); err == nil {
-			firstStart := session.Metadata["started_config_hash"] == ""
-			forceFresh := session.Metadata["wake_mode"] == "fresh"
-			if msg, ok := overrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
-				if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-					agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
-				} else {
-					existing := ""
-					if agentCfg.PromptSuffix != "" {
-						parts := shellquote.Split(agentCfg.PromptSuffix)
-						if len(parts) > 0 {
-							existing = parts[0]
-						}
-					}
-					if existing != "" {
-						agentCfg.PromptSuffix = shellquote.Quote(existing + "\n\n---\n\nUser message:\n" + msg)
-					} else {
-						agentCfg.PromptSuffix = shellquote.Quote(msg)
-					}
+	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
+		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
+		} else {
+			existing := ""
+			if agentCfg.PromptSuffix != "" {
+				parts := shellquote.Split(agentCfg.PromptSuffix)
+				if len(parts) > 0 {
+					existing = parts[0]
 				}
+			}
+			if existing != "" {
+				agentCfg.PromptSuffix = shellquote.Quote(existing + "\n\n---\n\nUser message:\n" + msg)
+			} else {
+				agentCfg.PromptSuffix = shellquote.Quote(msg)
 			}
 		}
 	}
@@ -960,6 +955,9 @@ func buildPreparedStartWithWorkDirResolver(
 	if gcProvider := sessionProviderFamily(*session); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
+	if triggerEnv := sessionTriggerBeadEnv(session); len(triggerEnv) > 0 {
+		agentCfg.Env = mergeEnv(agentCfg.Env, triggerEnv)
+	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
 		candidate:     candidate,
@@ -972,16 +970,31 @@ func buildPreparedStartWithWorkDirResolver(
 	}, nil
 }
 
+func sessionTriggerBeadEnv(session *beads.Bead) map[string]string {
+	if session == nil {
+		return nil
+	}
+	triggerBeadID := strings.TrimSpace(session.Metadata[beadmeta.TriggerBeadIDMetadataKey])
+	if triggerBeadID == "" {
+		return nil
+	}
+	env := map[string]string{
+		"GC_TRIGGER_BEAD_ID":      triggerBeadID,
+		"GC_TRIGGER_WORK_BEAD_ID": triggerBeadID,
+	}
+	if storeRef := strings.TrimSpace(session.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]); storeRef != "" {
+		env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
+		env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
+	}
+	return env
+}
+
 func parseSessionTemplateOverridesForLaunch(session *beads.Bead) map[string]string {
 	if session == nil {
 		return nil
 	}
-	rawOverrides := strings.TrimSpace(session.Metadata["template_overrides"])
-	if rawOverrides == "" {
-		return nil
-	}
-	var overrides map[string]string
-	if err := json.Unmarshal([]byte(rawOverrides), &overrides); err != nil {
+	overrides, err := sessionpkg.ParseTemplateOverrides(session.Metadata)
+	if err != nil {
 		log.Printf("session %s: invalid template_overrides JSON: %v", session.ID, err)
 		return nil
 	}
