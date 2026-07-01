@@ -2111,6 +2111,7 @@ func TestApplyAttemptRecipeScopeChecksSkipsDrain(t *testing.T) {
 			{
 				ID: "mol-test.converge.iteration.1.work",
 				Metadata: map[string]string{
+					// gitleaks:allow — test data, not a secret
 					beadmeta.ScopeRefMetadataKey:  "mol-test.converge.iteration.1",
 					beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
 				},
@@ -2119,6 +2120,7 @@ func TestApplyAttemptRecipeScopeChecksSkipsDrain(t *testing.T) {
 				ID: "mol-test.converge.iteration.1.drain",
 				Metadata: map[string]string{
 					beadmeta.KindMetadataKey:      beadmeta.KindDrain,
+					// gitleaks:allow — test data, not a secret
 					beadmeta.ScopeRefMetadataKey:  "mol-test.converge.iteration.1",
 					beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
 				},
