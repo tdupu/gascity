@@ -43,6 +43,7 @@ const (
 	AttemptMetadataKey                   = "gc.attempt"
 	BondMetadataKey                      = "gc.bond"
 	BondVarsMetadataKey                  = "gc.bond_vars"
+	BrainParentSIDMetadataKey            = "gc.brain_parent_sid"
 	CheckModeMetadataKey                 = "gc.check_mode"
 	CheckPathMetadataKey                 = "gc.check_path"
 	CheckTimeoutMetadataKey              = "gc.check_timeout"
@@ -59,6 +60,12 @@ const (
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
 	CurrentRunIDMetadataKey              = "gc.current_run_id"
+	// ActiveWorkBeadMetadataKey is the session bead's current-pointer to the STEP it
+	// is executing — the work bead's bare gc.step_id (NOT its namespaced bead id),
+	// stamped at the claim hook and read at the usage record site to populate
+	// usage.Fact.StepID. Empty when the current work has no formula step (ad-hoc /
+	// manual), matching the events plane. See engdocs/design/active-work-bead-v0.md.
+	ActiveWorkBeadMetadataKey            = "gc.active_work_bead"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -239,6 +246,7 @@ var KnownMetadataKeys = []string{
 	AttemptMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
+	BrainParentSIDMetadataKey,
 	CheckModeMetadataKey,
 	CheckPathMetadataKey,
 	CheckTimeoutMetadataKey,
@@ -254,6 +262,7 @@ var KnownMetadataKeys = []string{
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
 	CurrentRunIDMetadataKey,
+	ActiveWorkBeadMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
