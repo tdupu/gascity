@@ -957,8 +957,8 @@ github.com/spf13/viper v1.21.0/go.mod h1:P0lhsswPGWD/1lZJ9ny3fYnVqxiegrlNrEmgLjb
 github.com/spiffe/go-spiffe/v2 v2.6.0 h1:l+DolpxNWYgruGQVV0xsfeya3CsC7m8iBzDnMpsbLuo=
 github.com/spiffe/go-spiffe/v2 v2.6.0/go.mod h1:gm2SeUoMZEtpnzPNs2Csc0D/gX33k1xIx7lEzqblHEs=
 github.com/spkg/bom v0.0.0-20160624110644-59b7046e48ad/go.mod h1:qLr4V1qq6nMqFKkMo8ZTx3f+BZEkzsRUY10Xsm2mwU0=
-github.com/steveyegge/beads v1.0.6-0.20260621034415-4d08edbeb772 h1:+Gfq3DxsuOJYdPHsZxRyNjQgQO/2y1bQFxdfxXqPy8A=
-github.com/steveyegge/beads v1.0.6-0.20260621034415-4d08edbeb772/go.mod h1:WY6QCRDNy4hBDoiraIDmBFui/PMAJZ0Ip6CcVfBLXSk=
+github.com/steveyegge/beads v1.0.6-0.20260623091801-26be6aa94c89 h1:q4SsinH6t84xMN1F3uKqFh5HbwPjX17mOHAEfXDSO2M=
+github.com/steveyegge/beads v1.0.6-0.20260623091801-26be6aa94c89/go.mod h1:kGQMfFl+LvvOxQ8dAxUITxuTBeMbjv+eogStn+IiucE=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.1.1/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.2.0/go.mod h1:qt09Ya8vawLte6SNmTgCsAVtYtaKzEcn8ATUoHMkEqE=
