@@ -4,8 +4,10 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -96,6 +98,41 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+}
+
+// UnmarshalJSON customizes JSON unmarshaling for Bead to coerce numeric metadata
+// values to strings. This handles beads with metadata fields like gh_issue: 233
+// (JSON number) that should be strings in the map[string]string Metadata field.
+// Fixes: he-n0fn (gc hook --claim --json fails on beads whose metadata.gh_issue is a JSON number).
+func (b *Bead) UnmarshalJSON(data []byte) error {
+	type beadAlias Bead
+	aux := struct {
+		Metadata map[string]interface{} `json:"metadata,omitempty"`
+		*beadAlias
+	}{
+		beadAlias: (*beadAlias)(b),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.Metadata != nil {
+		b.Metadata = make(map[string]string, len(aux.Metadata))
+		for k, v := range aux.Metadata {
+			switch val := v.(type) {
+			case string:
+				b.Metadata[k] = val
+			case float64:
+				b.Metadata[k] = strconv.FormatFloat(val, 'f', -1, 64)
+			case bool:
+				b.Metadata[k] = strconv.FormatBool(val)
+			case nil:
+				b.Metadata[k] = ""
+			default:
+				b.Metadata[k] = fmt.Sprintf("%v", val)
+			}
+		}
+	}
+	return nil
 }
 
 // ConditionalAssignmentReleaser is implemented by stores that can release an
