@@ -2,6 +2,8 @@ package beads
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1452,6 +1454,78 @@ func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 	}
 	if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "9999" {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT after open = %q, want ambient restored", got)
+	}
+}
+
+// TestNativeDoltPoolIdleTimeoutBelowServerReadTimeout verifies the invariant
+// from gs-7ws: pool idle timeout must be strictly less than the Dolt server's
+// read_timeout_millis (default 15 000ms = 15s). A connection idling longer than
+// that is closed server-side; the next pool reuse returns "unexpected EOF".
+func TestNativeDoltPoolIdleTimeoutBelowServerReadTimeout(t *testing.T) {
+	const doltServerDefaultReadTimeout = 15_000 * time.Millisecond // config.DefaultDoltReadTimeoutMillis
+	if nativeDoltPoolIdleTimeout >= doltServerDefaultReadTimeout {
+		t.Errorf("nativeDoltPoolIdleTimeout %v must be < Dolt server read_timeout %v (gs-7ws)",
+			nativeDoltPoolIdleTimeout, doltServerDefaultReadTimeout)
+	}
+}
+
+// nativeDoltStorageSpyWithDB wraps the storage spy with a rawDBGetter
+// implementation so pool-configuration tests can verify DB() is called.
+type nativeDoltStorageSpyWithDB struct {
+	*nativeDoltStorageSpy
+	rawDB    *sql.DB
+	dbCalled int
+}
+
+func (s *nativeDoltStorageSpyWithDB) DB() *sql.DB {
+	s.dbCalled++
+	return s.rawDB
+}
+
+// nativeDoltStubConnector is a minimal driver.Connector that returns a
+// no-op connection, used to create a *sql.DB without a live server.
+type nativeDoltStubConnector struct{}
+
+func (nativeDoltStubConnector) Connect(_ context.Context) (driver.Conn, error) {
+	return nativeDoltStubConn{}, nil
+}
+func (nativeDoltStubConnector) Driver() driver.Driver { return nil }
+
+type nativeDoltStubConn struct{}
+
+func (nativeDoltStubConn) Prepare(_ string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+func (nativeDoltStubConn) Close() error                           { return nil }
+func (nativeDoltStubConn) Begin() (driver.Tx, error)              { return nil, driver.ErrSkip }
+
+// TestNewNativeDoltStoreAtAppliesPoolSettingsViaRawDBGetter verifies that
+// newNativeDoltStoreAt calls DB() on the storage to apply pool settings when
+// the storage satisfies rawDBGetter. Without this call, SetConnMaxIdleTime is
+// never applied and idle connections outlive the server's read_timeout. gs-7ws.
+func TestNewNativeDoltStoreAtAppliesPoolSettingsViaRawDBGetter(t *testing.T) {
+	fakeDB := sql.OpenDB(nativeDoltStubConnector{})
+	t.Cleanup(func() { _ = fakeDB.Close() })
+
+	spy := &nativeDoltStorageSpyWithDB{
+		nativeDoltStorageSpy: &nativeDoltStorageSpy{
+			getConfig: func(_ context.Context, _ string) (string, error) { return "gc", nil },
+		},
+		rawDB: fakeDB,
+	}
+
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	nativeDoltOpenBestAvailable = func(_ context.Context, _ string) (beadslib.Storage, error) {
+		return spy, nil
+	}
+
+	store, err := newNativeDoltStoreAt(context.Background(), t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("newNativeDoltStoreAt: %v", err)
+	}
+	t.Cleanup(func() { _ = store.CloseStore() })
+
+	if spy.dbCalled == 0 {
+		t.Error("rawDBGetter.DB() never called; pool idle timeout not applied (gs-7ws)")
 	}
 }
 

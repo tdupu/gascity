@@ -60,6 +60,18 @@ func repairIDDefault(db *sql.DB, table string) error {
 
 const nativeDoltStoreActor = "gascity"
 
+const (
+	// nativeDoltPoolIdleTimeout caps how long a pooled connection may sit idle
+	// before eviction. Must stay below the Dolt server's read_timeout_millis
+	// (default 15 000ms = 15s): once that fires, the server closes the socket
+	// and the next pool reuse produces "unexpected EOF" / dropped claim-writes.
+	// 10s gives 5s of margin below the default.
+	nativeDoltPoolIdleTimeout = 10 * time.Second
+	// nativeDoltPoolMaxLifetime caps total connection age so the pool does not
+	// accumulate connections that predate a Dolt restart.
+	nativeDoltPoolMaxLifetime = 60 * time.Second
+)
+
 var nativeDoltOpenReadyStatuses = []beadslib.Status{
 	beadslib.StatusOpen,
 	beadslib.StatusBlocked,
@@ -209,8 +221,16 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		return nil, fmt.Errorf("reading native issue prefix: %w", err)
 	}
 	if accessor, ok := storage.(rawDBGetter); ok {
+		db := accessor.DB()
+		// Bound idle-connection lifetime to stay below the Dolt server's
+		// read_timeout_millis (default 15s). Without this, a pooled connection
+		// can sit idle longer than the server's reap window, become stale, and
+		// cause "unexpected EOF" on the next use (dropped claim-writes, transient
+		// bead-not-found reads). See gs-7ws.
+		db.SetConnMaxIdleTime(nativeDoltPoolIdleTimeout)
+		db.SetConnMaxLifetime(nativeDoltPoolMaxLifetime)
 		for _, table := range idDefaultRepairTables {
-			if repairErr := repairIDDefault(accessor.DB(), table); repairErr != nil {
+			if repairErr := repairIDDefault(db, table); repairErr != nil {
 				// Log but don't fail: the error will surface on the first
 				// DepAdd / event-recording write against the affected table.
 				fmt.Fprintf(os.Stderr, "WARNING: gc beads: %v\n", repairErr)

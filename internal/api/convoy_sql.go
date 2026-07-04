@@ -38,6 +38,12 @@ var (
 	workflowSQLWispTables  = workflowSQLTableSet{beads: "wisps", labels: "wisp_labels", deps: "wisp_dependencies"}
 )
 
+// doltPoolIdleTimeout caps how long a pooled Dolt connection may sit idle.
+// Must stay below the Dolt server's read_timeout_millis (default 15 000ms =
+// 15s); 10s gives 5s of margin so the pool retires the connection before the
+// server closes it and a reuse attempt sees "unexpected EOF". See gs-7ws.
+const doltPoolIdleTimeout = 10 * time.Second
+
 func workflowSQLCandidatesForWorkflowID(
 	state State,
 	workflowID, requestedScopeKind, requestedScopeRef string,
@@ -71,6 +77,7 @@ func workflowSQLSnapshot(user, password, host string, port int, database, rootID
 	defer db.Close() //nolint:errcheck // best-effort cleanup
 	db.SetMaxOpenConns(1)
 	db.SetConnMaxLifetime(30 * time.Second)
+	db.SetConnMaxIdleTime(doltPoolIdleTimeout)
 
 	tableSets, err := workflowSQLAvailableTableSets(db)
 	if err != nil {
@@ -736,6 +743,7 @@ func openWorkflowSQLDB(user, password, host string, port int, database string) (
 	}
 	db.SetMaxOpenConns(1)
 	db.SetConnMaxLifetime(30 * time.Second)
+	db.SetConnMaxIdleTime(doltPoolIdleTimeout)
 	return db, nil
 }
 
