@@ -1323,6 +1323,13 @@ func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
 	if holderPID == state.PID {
 		return true
 	}
+	if holderPID == 0 {
+		// lsof could not identify the port holder. Port reachability and PID
+		// liveness were already confirmed above; accept the state so environments
+		// that restrict lsof (containers, restricted CI) don't fall through to the
+		// expensive PID-based reverse-lookup path or the health-script recovery path.
+		return true
+	}
 	return owned
 }
 

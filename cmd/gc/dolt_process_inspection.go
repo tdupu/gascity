@@ -471,7 +471,9 @@ func managedPIDFromPSByDataDir(dataDir string) int {
 }
 
 func doltPSLines() []string {
-	out, err := exec.Command("ps", "ax", "-o", "pid,args").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), processArgsPSTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "ax", "-o", "pid,args").Output()
 	if err != nil {
 		return nil
 	}

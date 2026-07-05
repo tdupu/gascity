@@ -26,32 +26,42 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 		layout.StateFile = stateFile
 	}
 
+	writeAndPublish := func(path string, repaired doltRuntimeState) error {
+		if err := writeDoltRuntimeStateFile(path, repaired); err != nil {
+			return err
+		}
+		if !samePath(path, canonicalStateFile) {
+			return nil
+		}
+		return publishManagedDoltRuntimeStateIfOwned(cityPath)
+	}
+	// repairForProvider tries both port-holder and PID-based repair. The
+	// PID-based path is intentionally restricted to chooseManagedDoltPort
+	// (the provider context) so that publishManagedDoltRuntimeState never
+	// triggers an expensive ps(1) scan or process-inspection hang.
+	repairForProvider := func(s doltRuntimeState) (doltRuntimeState, bool) {
+		if repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, s); ok {
+			return repaired, true
+		}
+		return repairedManagedDoltRuntimeStateByPID(layout, s)
+	}
+
 	if state, err := readDoltRuntimeStateFile(stateFile); err == nil {
 		if validDoltRuntimeState(state, cityPath) {
 			return strconv.Itoa(state.Port), nil
 		}
-		if repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, state); ok {
+		if repaired, ok := repairForProvider(state); ok {
 			if repaired != state {
-				if err := writeDoltRuntimeStateFile(stateFile, repaired); err != nil {
+				if err := writeAndPublish(stateFile, repaired); err != nil {
 					return "", fmt.Errorf("repair provider runtime state: %w", err)
-				}
-				if samePath(stateFile, canonicalStateFile) {
-					if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
-						return "", fmt.Errorf("publish repaired managed dolt runtime state: %w", err)
-					}
 				}
 			}
 			return strconv.Itoa(repaired.Port), nil
 		}
 		if hint, found, hintErr := readPublishedDoltRuntimeStateHint(cityPath); hintErr == nil && found {
-			if repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, hint); ok {
-				if err := writeDoltRuntimeStateFile(stateFile, repaired); err != nil {
+			if repaired, ok := repairForProvider(hint); ok {
+				if err := writeAndPublish(stateFile, repaired); err != nil {
 					return "", fmt.Errorf("repair provider runtime state from published hint: %w", err)
-				}
-				if samePath(stateFile, canonicalStateFile) {
-					if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
-						return "", fmt.Errorf("publish repaired managed dolt runtime state: %w", err)
-					}
 				}
 				return strconv.Itoa(repaired.Port), nil
 			}
@@ -59,14 +69,9 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("read provider runtime state: %w", err)
 	} else if hint, found, hintErr := readPublishedDoltRuntimeStateHint(cityPath); hintErr == nil && found {
-		if repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, hint); ok {
-			if err := writeDoltRuntimeStateFile(stateFile, repaired); err != nil {
+		if repaired, ok := repairForProvider(hint); ok {
+			if err := writeAndPublish(stateFile, repaired); err != nil {
 				return "", fmt.Errorf("repair missing provider runtime state: %w", err)
-			}
-			if samePath(stateFile, canonicalStateFile) {
-				if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
-					return "", fmt.Errorf("publish repaired managed dolt runtime state: %w", err)
-				}
 			}
 			return strconv.Itoa(repaired.Port), nil
 		}
@@ -88,9 +93,11 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 	port := strconv.Itoa(state.Port)
 	holderPID := findPortHolderPID(port)
 	if holderPID <= 0 {
-		// Stored port has no listener: the server may have rebound to a
-		// different ephemeral port. Try to find it via PID-based reverse lookup.
-		return repairedManagedDoltRuntimeStateByPID(layout, state)
+		// No listener on the stored port — let the caller decide whether to
+		// attempt the more expensive PID-based reverse lookup. Returning false
+		// here prevents publishManagedDoltRuntimeState from triggering a ps(1)
+		// scan; only chooseManagedDoltPort (via repairForProvider) does that.
+		return doltRuntimeState{}, false
 	}
 	stateDir := strings.TrimSpace(state.DataDir)
 	if stateDir == "" {
@@ -140,7 +147,12 @@ func managedPIDFromNonPortSources(layout managedDoltRuntimeLayout) int {
 // file, config file, data directory), then discovers the actual listening port
 // via reverse lookup (PID → ports), and validates ownership and reachability.
 func repairedManagedDoltRuntimeStateByPID(layout managedDoltRuntimeLayout, state doltRuntimeState) (doltRuntimeState, bool) {
-	pid := managedPIDFromNonPortSources(layout)
+	// Prefer the PID already recorded in state when it is still alive —
+	// this avoids the expensive ps(1) scan in managedPIDFromNonPortSources.
+	pid := state.PID
+	if pid <= 0 || !pidAlive(pid) {
+		pid = managedPIDFromNonPortSources(layout)
+	}
 	if pid <= 0 {
 		return doltRuntimeState{}, false
 	}
