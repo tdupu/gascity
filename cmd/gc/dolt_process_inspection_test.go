@@ -159,3 +159,82 @@ dolt      123 user    5u   REG   1,4     4096  99 /tmp/my city/.beads/dolt/held.
 		t.Fatalf("target = %q, want full spaced path", targets[0])
 	}
 }
+
+func TestPortsFromLsofListenOutput(t *testing.T) {
+	output := fmt.Sprintf(`COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+dolt    %d user   14u  IPv4 0x1234      0t0  TCP 127.0.0.1:58506 (LISTEN)
+`, os.Getpid())
+	ports := portsFromLsofListenOutput(output)
+	if len(ports) != 1 {
+		t.Fatalf("portsFromLsofListenOutput() returned %d ports, want 1: %v", len(ports), ports)
+	}
+	if ports[0] != "58506" {
+		t.Errorf("port = %q, want 58506", ports[0])
+	}
+}
+
+func TestPortsFromLsofListenOutputSkipsNonListen(t *testing.T) {
+	output := `COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+dolt    123 user   14u  IPv4 0x1234      0t0  TCP 127.0.0.1:58506->127.0.0.1:12345 (ESTABLISHED)
+`
+	ports := portsFromLsofListenOutput(output)
+	if len(ports) != 0 {
+		t.Errorf("portsFromLsofListenOutput() = %v, want empty (ESTABLISHED line should be skipped)", ports)
+	}
+}
+
+func TestPortsFromLsofListenOutputDeduplicates(t *testing.T) {
+	output := `COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+dolt    123 user   14u  IPv4 0x1234      0t0  TCP 127.0.0.1:58506 (LISTEN)
+dolt    123 user   15u  IPv6 0x5678      0t0  TCP *:58506 (LISTEN)
+`
+	ports := portsFromLsofListenOutput(output)
+	if len(ports) != 1 {
+		t.Fatalf("portsFromLsofListenOutput() returned %d ports, want 1 (dedup): %v", len(ports), ports)
+	}
+	if ports[0] != "58506" {
+		t.Errorf("port = %q, want 58506", ports[0])
+	}
+}
+
+func TestFindListeningPortsForPIDFromLsofParsesOutput(t *testing.T) {
+	binDir := t.TempDir()
+	lsofScript := filepath.Join(binDir, "lsof")
+	script := "#!/bin/sh\nprintf 'COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\\ndolt 1234 user 14u IPv4 0x1234 0t0 TCP 127.0.0.1:58506 (LISTEN)\\n'\n"
+	if err := os.WriteFile(lsofScript, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(lsof): %v", err)
+	}
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+
+	ports := listeningPortsForPIDFromLsof(1234)
+	if len(ports) != 1 || ports[0] != "58506" {
+		t.Errorf("listeningPortsForPIDFromLsof() = %v, want [58506]", ports)
+	}
+}
+
+func TestFindListeningPortsForPIDFromProcFindsPort(t *testing.T) {
+	if _, err4 := os.Stat("/proc/net/tcp"); err4 != nil {
+		if _, err6 := os.Stat("/proc/net/tcp6"); err6 != nil {
+			t.Skip("requires Linux /proc TCP tables")
+		}
+	}
+
+	listener := listenOnRandomPort(t)
+	defer func() { _ = listener.Close() }()
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	ports, checked := listeningPortsForPIDFromProc(os.Getpid())
+	if !checked {
+		t.Fatal("listeningPortsForPIDFromProc returned checked=false on a system with /proc")
+	}
+	found := false
+	for _, p := range ports {
+		if p == strconv.Itoa(port) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("listeningPortsForPIDFromProc did not find port %d in %v", port, ports)
+	}
+}

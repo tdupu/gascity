@@ -88,7 +88,9 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 	port := strconv.Itoa(state.Port)
 	holderPID := findPortHolderPID(port)
 	if holderPID <= 0 {
-		return doltRuntimeState{}, false
+		// Stored port has no listener: the server may have rebound to a
+		// different ephemeral port. Try to find it via PID-based reverse lookup.
+		return repairedManagedDoltRuntimeStateByPID(layout, state)
 	}
 	stateDir := strings.TrimSpace(state.DataDir)
 	if stateDir == "" {
@@ -115,6 +117,66 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 		repaired.StartedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	return repaired, true
+}
+
+// managedPIDFromNonPortSources finds the managed Dolt PID using sources that
+// do not depend on the stored port being correct: PID file, config file, and
+// data directory (in that preference order).
+func managedPIDFromNonPortSources(layout managedDoltRuntimeLayout) int {
+	if pid := managedPIDFromPIDFile(layout.PIDFile); pid > 0 {
+		return pid
+	}
+	if pid := managedPIDFromPSByConfig(layout.ConfigFile); pid > 0 {
+		return pid
+	}
+	if pid := managedPIDFromPSByDataDir(layout.DataDir); pid > 0 {
+		return pid
+	}
+	return 0
+}
+
+// repairedManagedDoltRuntimeStateByPID recovers when the port stored in state
+// has no listener. It finds the managed Dolt PID via non-port sources (PID
+// file, config file, data directory), then discovers the actual listening port
+// via reverse lookup (PID → ports), and validates ownership and reachability.
+func repairedManagedDoltRuntimeStateByPID(layout managedDoltRuntimeLayout, state doltRuntimeState) (doltRuntimeState, bool) {
+	pid := managedPIDFromNonPortSources(layout)
+	if pid <= 0 {
+		return doltRuntimeState{}, false
+	}
+	stateDir := strings.TrimSpace(state.DataDir)
+	if stateDir == "" {
+		stateDir = layout.DataDir
+	}
+	if !managedDoltProcessOwnedWithStateDir(pid, layout, stateDir) {
+		return doltRuntimeState{}, false
+	}
+	if processHasDeletedDataInodes(pid, layout.DataDir) {
+		return doltRuntimeState{}, false
+	}
+	for _, actualPort := range findListeningPortsForPID(pid) {
+		if !managedDoltTCPReachable("127.0.0.1", actualPort) {
+			continue
+		}
+		holderPID := findPortHolderPID(actualPort)
+		if holderPID > 0 && holderPID != pid {
+			continue
+		}
+		portNum, err := strconv.Atoi(actualPort)
+		if err != nil {
+			continue
+		}
+		repaired := state
+		repaired.Running = true
+		repaired.PID = pid
+		repaired.Port = portNum
+		repaired.DataDir = layout.DataDir
+		if strings.TrimSpace(repaired.StartedAt) == "" {
+			repaired.StartedAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		return repaired, true
+	}
+	return doltRuntimeState{}, false
 }
 
 func deterministicManagedDoltPortSeed(cityPath string) int {

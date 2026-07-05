@@ -648,6 +648,125 @@ func processCWDMatches(pid int, dataDir string) bool {
 	return ok && samePath(cwd, dataDir)
 }
 
+// listeningPortsForPIDFromProc returns all TCP LISTEN ports held by pid via
+// /proc. Returns (ports, true) when /proc TCP tables are available,
+// (nil, false) when /proc is absent (e.g. macOS).
+func listeningPortsForPIDFromProc(pid int) ([]string, bool) {
+	if pid <= 0 {
+		return nil, false
+	}
+	fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
+	fds, err := os.ReadDir(fdDir)
+	if err != nil {
+		return nil, false
+	}
+	// Collect socket inodes held by this PID.
+	pidInodes := map[string]struct{}{}
+	for _, fd := range fds {
+		target, linkErr := os.Readlink(filepath.Join(fdDir, fd.Name()))
+		if linkErr != nil || !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
+			continue
+		}
+		inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
+		pidInodes[inode] = struct{}{}
+	}
+	// Match those inodes against TCP LISTEN entries in /proc/net/tcp[6].
+	checked := false
+	seen := map[string]struct{}{}
+	var ports []string
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			continue
+		}
+		checked = true
+		scanner := bufio.NewScanner(strings.NewReader(string(data)))
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			// /proc/net/tcp columns: sl local_address rem_address st … inode
+			if len(fields) < 10 || fields[3] != "0A" { // 0A = TCP_LISTEN
+				continue
+			}
+			inode := fields[9]
+			if _, ok := pidInodes[inode]; !ok {
+				continue
+			}
+			_, portHex, ok := strings.Cut(fields[1], ":")
+			if !ok {
+				continue
+			}
+			portNum, parseErr := strconv.ParseUint(portHex, 16, 16)
+			if parseErr != nil {
+				continue
+			}
+			portStr := strconv.Itoa(int(portNum))
+			if _, dup := seen[portStr]; !dup {
+				ports = append(ports, portStr)
+				seen[portStr] = struct{}{}
+			}
+		}
+	}
+	return ports, checked
+}
+
+// listeningPortsForPIDFromLsof returns TCP LISTEN ports held by pid via lsof.
+func listeningPortsForPIDFromLsof(pid int) []string {
+	if pid <= 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("lsof"); err != nil {
+		return nil
+	}
+	out, err := lsofOutput("-a", "-p", strconv.Itoa(pid), "-iTCP", "-sTCP:LISTEN", "-nP")
+	if err == nil {
+		return portsFromLsofListenOutput(string(out))
+	}
+	// Some lsof versions do not support -sTCP:LISTEN; fall back without it.
+	out, err = lsofOutput("-a", "-p", strconv.Itoa(pid), "-iTCP", "-nP")
+	if err != nil {
+		return nil
+	}
+	return portsFromLsofListenOutput(string(out))
+}
+
+// portsFromLsofListenOutput parses port numbers from lsof output, keeping only
+// LISTEN lines. Each LISTEN line has a NAME field like "127.0.0.1:58506".
+func portsFromLsofListenOutput(output string) []string {
+	seen := map[string]struct{}{}
+	var ports []string
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.Contains(line, "(LISTEN)") {
+			continue
+		}
+		for _, f := range strings.Fields(line) {
+			f = strings.TrimSuffix(f, "(LISTEN)")
+			f = strings.TrimSpace(f)
+			idx := strings.LastIndex(f, ":")
+			if idx < 0 {
+				continue
+			}
+			portStr := f[idx+1:]
+			if _, err := strconv.Atoi(portStr); err != nil {
+				continue
+			}
+			if _, dup := seen[portStr]; !dup {
+				ports = append(ports, portStr)
+				seen[portStr] = struct{}{}
+			}
+		}
+	}
+	return ports
+}
+
+// findListeningPortsForPID returns all TCP LISTEN ports held by pid.
+// Uses /proc when available, falls back to lsof.
+func findListeningPortsForPID(pid int) []string {
+	if ports, checked := listeningPortsForPIDFromProc(pid); checked {
+		return ports
+	}
+	return listeningPortsForPIDFromLsof(pid)
+}
+
 func doltProcessInspectionFields(info managedDoltProcessInspection) []string {
 	return []string{
 		fmt.Sprintf("managed_pid\t%d", info.ManagedPID),

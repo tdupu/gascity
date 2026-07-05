@@ -232,6 +232,70 @@ func TestRepairedManagedDoltRuntimeStateAcceptsSymlinkEquivalentDataDir(t *testi
 	}
 }
 
+// TestRepairedManagedDoltRuntimeStateRecoversStalePort is the regression test
+// for gs-gzl: when the Dolt server rebinds to an ephemeral port (e.g. 58506)
+// after a startup collision, but the provider state still records the original
+// configured port (e.g. 3307), repairedManagedDoltRuntimeState must recover
+// the actual port via PID-based reverse lookup instead of returning ok=false.
+func TestRepairedManagedDoltRuntimeStateRecoversStalePort(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+
+	// Acquire a free port for the actual (ephemeral) bind.
+	actualPort := reserveRandomTCPPort(t)
+
+	// Start a listener in the layout data dir to emulate the running server.
+	listener := startTCPListenerProcessInDir(t, actualPort, layout.DataDir)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+
+	// Acquire a different free port to use as the stale configured-port value.
+	stalePort := reserveRandomTCPPort(t)
+	if stalePort == actualPort {
+		t.Skip("stale and actual ports collided; rerun")
+	}
+
+	// Write the PID file so managedPIDFromNonPortSources finds the process
+	// without probing any port.
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll for PID file dir: %v", err)
+	}
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(listener.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("WriteFile(PIDFile): %v", err)
+	}
+
+	// State carries the stale port: nobody is listening on it.
+	state := doltRuntimeState{
+		Port:    stalePort,
+		DataDir: layout.DataDir,
+	}
+
+	repaired, ok := repairedManagedDoltRuntimeState(cityPath, layout, state)
+	if !ok {
+		t.Fatalf("repairedManagedDoltRuntimeState returned ok=false; server is on port %d but state says %d", actualPort, stalePort)
+	}
+	if !repaired.Running {
+		t.Error("repaired.Running = false, want true")
+	}
+	if repaired.PID != listener.Process.Pid {
+		t.Errorf("repaired.PID = %d, want %d", repaired.PID, listener.Process.Pid)
+	}
+	if repaired.Port != actualPort {
+		t.Errorf("repaired.Port = %d, want %d (stale stored port was %d)", repaired.Port, actualPort, stalePort)
+	}
+	if repaired.DataDir != layout.DataDir {
+		t.Errorf("repaired.DataDir = %q, want %q", repaired.DataDir, layout.DataDir)
+	}
+	if strings.TrimSpace(repaired.StartedAt) == "" {
+		t.Error("repaired.StartedAt is empty")
+	}
+}
+
 func TestDoltStateRuntimeLayoutCmdHonorsProjectedOverrides(t *testing.T) {
 	cityPath := t.TempDir()
 	t.Setenv("GC_CITY_RUNTIME_DIR", "/runtime-root")
