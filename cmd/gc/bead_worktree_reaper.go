@@ -124,10 +124,17 @@ func reapClosedBeadWorktrees(
 			// Capture branch before removal — the worktree dir will be gone after.
 			branch, _ := wg.CurrentBranch()
 
-			// Remove the worktree. git worktree remove must be run from the
-			// main repo root, not from within the worktree being removed.
-			mainRepo := git.New(cityPath)
-			if err := mainRepo.WorktreeRemove(worktreePath, false); err != nil {
+			// Remove the worktree. git worktree remove must be run from the rig
+			// root — not from cityPath — so that rigs using a bare .repo.git have
+			// their worktrees removed from the correct repository. Using cityPath
+			// here causes "not a working tree" (exit 128) for any worktree
+			// registered in a rig-scoped repo rather than the city root.
+			rigRoot := lookupRigRoot(rigName, cfg)
+			if rigRoot == "" {
+				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: rig %q not in config, skipping %s\n", rigName, worktreePath) //nolint:errcheck
+				continue
+			}
+			if err := git.New(rigRoot).WorktreeRemove(worktreePath, false); err != nil {
 				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: removing %s: %v\n", worktreePath, err) //nolint:errcheck
 				continue
 			}
@@ -180,4 +187,17 @@ func isStrictlyUnderDir(dir, path string) bool {
 		return false
 	}
 	return rel != "." && !strings.HasPrefix(rel, "..")
+}
+
+// lookupRigRoot returns the filesystem path configured for the named rig, or
+// "" when the rig is not listed in cfg.Rigs or its path is empty. Mirrors the
+// inner rig-name→path lookup in lookupRigRootForSession (session_worktree_prune.go)
+// but operates on a rig name directly rather than extracting it from session metadata.
+func lookupRigRoot(rigName string, cfg *config.City) string {
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == rigName {
+			return strings.TrimSpace(cfg.Rigs[i].Path)
+		}
+	}
+	return ""
 }
