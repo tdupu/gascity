@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -52,10 +54,16 @@ type fakeState struct {
 	autos             []orders.Order
 	allOrders         []orders.Order
 	services          workspacesvc.Registry
+	webhookDispatcher orderdispatch.Dispatcher // backs WebhookDispatchProvider; nil disables webhook dispatch
 	pokeCount         int
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
+	// scopedStoreFn backs ScopedStoreLike. Nil (the default) returns
+	// (nil, nil) — "existing isn't bd-CLI backed, keep using it directly" —
+	// matching the real implementation's answer for the MemStore fakes most
+	// tests use.
+	scopedStoreFn func(ctx context.Context, existing beads.Store) (beads.Store, error)
 }
 
 func newFakeState(t testing.TB) *fakeState {
@@ -108,6 +116,13 @@ func (f *fakeState) StartedAt() time.Time                  { return f.startedAt 
 func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
 func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
+func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
+	if f.scopedStoreFn == nil {
+		return nil, nil
+	}
+	return f.scopedStoreFn(ctx, existing)
+}
+
 func (f *fakeState) NudgesBeadStore() beads.NudgesStore {
 	if f.nudgesBeadStore != nil {
 		return beads.NudgesStore{Store: f.nudgesBeadStore}
@@ -143,8 +158,14 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	}
 	return f.autos
 }
-func (f *fakeState) Poke()                                    { f.pokeCount++ }
-func (f *fakeState) ServiceRegistry() workspacesvc.Registry   { return f.services }
+func (f *fakeState) Poke()                                  { f.pokeCount++ }
+func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
+
+// WebhookDispatcher lets fakeState satisfy WebhookDispatchProvider so webhook
+// receiver tests can inject a fake dispatcher (or leave it nil to exercise the
+// dispatch-unavailable path).
+func (f *fakeState) WebhookDispatcher() orderdispatch.Dispatcher { return f.webhookDispatcher }
+
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
 func (f *fakeState) MaintenanceLoop() MaintenanceProvider     { return f.maintenance }

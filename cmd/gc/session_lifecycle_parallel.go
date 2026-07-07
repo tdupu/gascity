@@ -806,7 +806,7 @@ func refreshConfiguredNamedStartCandidate(
 		}
 		return candidate
 	}
-	refreshed, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, snapshot.Open(), *candidate.session, clk, stderr)
+	refreshed, err := resolvePreservedConfiguredNamedSessionTemplate(cityPath, cityName, cfg, sp, store, snapshot.OpenInfos(), sessionpkg.InfoFromPersistedBead(*candidate.session), clk, stderr)
 	if err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: refreshing named session start %s: %v\n", candidate.name(), err) //nolint:errcheck
@@ -901,7 +901,7 @@ func buildPreparedStartWithWorkDirResolver(
 	if sk := strings.TrimSpace(session.Metadata["session_key"]); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, session.Metadata)
 		if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk); probeable && !present {
-			var sessFront *sessionpkg.InfoStore
+			var sessFront *sessionpkg.Store
 			if store != nil {
 				sessFront = sessionFrontDoor(store)
 			}
@@ -1065,7 +1065,7 @@ func parseSessionTemplateOverridesForLaunch(session *beads.Bead) map[string]stri
 	if session == nil {
 		return nil
 	}
-	overrides, err := sessionpkg.ParseTemplateOverrides(session.Metadata)
+	overrides, err := sessionpkg.ParseTemplateOverridesFromInfo(sessionpkg.InfoFromPersistedBead(*session))
 	if err != nil {
 		log.Printf("session %s: invalid template_overrides JSON: %v", session.ID, err)
 		return nil
@@ -1461,7 +1461,7 @@ func commitAsyncStartResultWithContext(
 	template := result.prepared.candidate.tp.TemplateName
 	// Session front door constructed once from the same store; nil when store
 	// is nil so the session-only leaves keep their store==nil short-circuit.
-	var sessFront *sessionpkg.InfoStore
+	var sessFront *sessionpkg.Store
 	if store != nil {
 		sessFront = sessionFrontDoor(store)
 	}
@@ -1557,16 +1557,22 @@ func asyncStartPreparedCommandStale(prepared preparedStart, current beads.Bead) 
 	return preparedCommand != "" && currentCommand != "" && preparedCommand != currentCommand
 }
 
-func clearPendingStartInFlightLease(session *beads.Bead, sessFront *sessionpkg.InfoStore, stderr io.Writer) {
+// clearPendingStartInFlightLease clears last_woke_at. Returns the mirrored
+// {"last_woke_at":""} batch when the clear persisted, nil otherwise, so the
+// rollback callers can fold it onto the typed snapshot (Step 6d write-returns-Info).
+// Most callers discard the return.
+func clearPendingStartInFlightLease(session *beads.Bead, sessFront *sessionpkg.Store, stderr io.Writer) map[string]string {
 	if session == nil || sessFront == nil {
-		return
+		return nil
 	}
 	if setMeta(sessFront, session.ID, "last_woke_at", "", stderr) == nil {
 		if session.Metadata == nil {
 			session.Metadata = make(map[string]string)
 		}
 		session.Metadata["last_woke_at"] = ""
+		return map[string]string{"last_woke_at": ""}
 	}
+	return nil
 }
 
 func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr io.Writer) {
@@ -1853,7 +1859,7 @@ func providerCommandBaseName(rp *config.ResolvedProvider) string {
 // the clears performed by recordWakeFailure (cmd/gc/session_reconcile.go) and
 // Manager.clearStaleResumeMetadata (internal/session/chat.go), so downstream
 // breaker / churn logic treats this as the same kind of recovery cycle.
-func clearStaleResumeKeyMetadata(session *beads.Bead, sessFront *sessionpkg.InfoStore) {
+func clearStaleResumeKeyMetadata(session *beads.Bead, sessFront *sessionpkg.Store) {
 	if session == nil {
 		return
 	}
@@ -1875,7 +1881,7 @@ func clearStaleResumeKeyMetadata(session *beads.Bead, sessFront *sessionpkg.Info
 
 func commitStartResult(
 	result startResult,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	clk clock.Clock,
 	rec events.Recorder,
 	wave int, //nolint:unparam // always 0 here but passed through to commitStartResultTraced which uses it
@@ -1901,7 +1907,7 @@ func confirmPendingStart(currentState string) bool {
 
 func commitStartResultTraced(
 	result startResult,
-	sessFront *sessionpkg.InfoStore,
+	sessFront *sessionpkg.Store,
 	clk clock.Clock,
 	rec events.Recorder,
 	wave int,
@@ -1979,10 +1985,14 @@ func commitStartResultTraced(
 		clearPendingStartInFlightLease(session, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {
-			trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "failed", traceRecordPayload{
-				"wave":  wave,
-				"error": err.Error(),
-			}, "")
+			trace.RecordMutation(TraceSiteMutationBeadMetadata, TraceReasonUnknown, TraceOutcomeFailed, "metadata_batch", session.ID, "started_config_hash", traceRecordPayload{
+				"wave":     wave,
+				"error":    err.Error(),
+				"template": tp.TemplateName,
+				"before":   "",
+				"after":    result.prepared.coreHash,
+				"field":    "started_config_hash",
+			})
 		}
 		// The runtime started, but we failed to persist metadata
 		// (including the state transition to active). Report failure so
@@ -2010,9 +2020,13 @@ func commitStartResultTraced(
 	})
 	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), nil)
 	if trace != nil {
-		trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
-			"wave": wave,
-		}, "")
+		trace.RecordMutation(TraceSiteMutationBeadMetadata, TraceReasonUnknown, TraceOutcomeSuccess, "metadata_batch", session.ID, "started_config_hash", traceRecordPayload{
+			"wave":     wave,
+			"template": tp.TemplateName,
+			"before":   "",
+			"after":    result.prepared.coreHash,
+			"field":    "started_config_hash",
+		})
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil, result.phases)
 	return true
@@ -2023,20 +2037,20 @@ func commitStartResultTraced(
 // wake-failure accounting, plus the matching trace and log records. It is split
 // out of commitStartResultTraced to keep the success path legible; the caller
 // returns false after invoking it.
-func commitStartFailure(result startResult, sessFront *sessionpkg.InfoStore, clk clock.Clock, rec events.Recorder, wave int, stderr io.Writer, trace *sessionReconcilerTraceCycle) {
+func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clock.Clock, rec events.Recorder, wave int, stderr io.Writer, trace *sessionReconcilerTraceCycle) {
 	session := result.prepared.candidate.session
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
-		if err := markProviderTerminalError(session, sessFront, clk, reason); err != nil {
+		if _, err := markProviderTerminalError(session, sessFront, clk, reason); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, err) //nolint:errcheck
 		}
 		if trace != nil {
-			trace.recordOperation("reconciler.start.terminal_provider_error", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartTerminalProviderError, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error":  formatLifecycleError(result.err),
 				"reason": reason,
-			}, "")
+			})
 		}
 		if result.rollbackPending {
 			rollbackPendingCreate(session, sessFront, clk.Now().UTC(), stderr)
@@ -2045,21 +2059,21 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.InfoStore, clk
 		return
 	}
 	if result.rateLimitScreen {
-		if err := recordRateLimitQuarantine(session, sessFront, clk); err != nil {
+		if _, err := recordRateLimitQuarantine(session, sessFront, clk); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
 			if trace != nil {
-				trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "hold_deferred", traceRecordPayload{
+				trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHoldDeferred, "", tp.TemplateName, name, 0, traceRecordPayload{
 					"error": formatLifecycleError(result.err),
 					"cause": err.Error(),
-				}, "")
+				})
 			}
 			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 			return
 		}
 		if trace != nil {
-			trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "held", traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartRateLimitHold, TraceReasonStart, TraceOutcomeHeld, "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
-			}, "")
+			})
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 		return
@@ -2079,9 +2093,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.InfoStore, clk
 		// Genuine wake-failure accounting happens on the non-rollback path
 		// below via recordWakeFailure.
 		if trace != nil {
-			trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+			trace.RecordOperation(TraceSiteLifecycleStartRollback, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
 				"error": formatLifecycleError(result.err),
-			}, "")
+			})
 		}
 		rollbackPendingCreate(session, sessFront, clk.Now().UTC(), stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
@@ -2097,13 +2111,18 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.InfoStore, clk
 	// even for a namepool-themed pool instance whose bead predates agent_name.
 	recordWakeFailure(session, sessFront, clk, tp.DisplayName())
 	if trace != nil {
-		trace.recordOperation("reconciler.start.failed", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, TraceOutcomeCode(result.outcome), "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),
-		}, "")
+		})
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 }
 
+// recoverRunningPendingCreate heals an already-active bead whose
+// pending_create_claim flag was left set after a partial write on a prior tick.
+// Returns (true, metadata) when the heal was persisted, (false, nil) on any
+// early-out or failure. The caller folds the returned metadata onto the typed
+// snapshot via ApplyPatch (nil is a no-op).
 func recoverRunningPendingCreate(
 	session *beads.Bead,
 	tp TemplateParams,
@@ -2111,18 +2130,18 @@ func recoverRunningPendingCreate(
 	store beads.Store,
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
-) bool {
+) (bool, map[string]string) {
 	if session == nil || store == nil {
-		return false
+		return false, nil
 	}
 	prepared, err := buildPreparedStart(startCandidate{session: session, tp: tp}, cfg, store)
 	if err != nil {
 		if trace != nil {
-			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_rebuild_failed", "failed", traceRecordPayload{
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRebuildFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
 				"error": err.Error(),
-			}, nil, "")
+			})
 		}
-		return false
+		return false, pendingCreateResidueFold(session)
 	}
 	coreBreakdown := ""
 	if bdj, err := json.Marshal(prepared.coreBreakdown); err == nil {
@@ -2159,11 +2178,11 @@ func recoverRunningPendingCreate(
 	})
 	if err := sessionFrontDoor(store).ApplyPatch(session.ID, metadata); err != nil {
 		if trace != nil {
-			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_commit_failed", "failed", traceRecordPayload{
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
 				"error": err.Error(),
-			}, nil, "")
+			})
 		}
-		return false
+		return false, pendingCreateResidueFold(session)
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(metadata))
@@ -2171,10 +2190,53 @@ func recoverRunningPendingCreate(
 	for key, value := range metadata {
 		session.Metadata[key] = value
 	}
-	if trace != nil {
-		trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_healed", "healed", nil, nil, "")
+	// buildPreparedStart mints instance_token onto the bead + store (SetMarker) when
+	// it was empty — a residue outside CommitStartedPatch. Carry it in the returned
+	// fold batch so the caller's snapshot reflects it: the Phase-2 drain scan reads
+	// info.InstanceToken (verifiedStop). Already persisted, so this augments only the
+	// returned fold, not the store write.
+	if tok := session.Metadata["instance_token"]; tok != "" {
+		metadata["instance_token"] = tok
 	}
-	return true
+	if trace != nil {
+		trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateHealed, TraceOutcomeHealed, tp.TemplateName, tp.SessionName, nil)
+	}
+	return true, metadata
+}
+
+// pendingCreateResidueFold returns the buildPreparedStart residue that
+// recoverRunningPendingCreate must carry on the paths that abort before
+// CommitStartedPatch persists, so the caller's snapshot matches the raw bead
+// buildPreparedStart already mutated:
+//   - the stale-resume started_config_hash clear (clearStaleResumeKeyMetadata
+//     writes it to the raw bead + store outside any folded batch) — the
+//     forward-pass config-drift gate reads info.StartedConfigHash (Step 5a),
+//     and a "" hash must skip that block (startup-window, #127), so the snapshot
+//     must not keep the stale pre-tick hash. Its current value is folded: the
+//     clear ("") when the guard fired, or the unchanged original (a no-op fold)
+//     otherwise. Always present, so the returned batch is never nil.
+//   - the instance_token mint (only when set) — the Phase-2 drain scan reads
+//     info.InstanceToken (verifiedStop, Step 2b) and must not see a stale "".
+//
+// The other two clearStaleResumeKeyMetadata keys are not folded here on purpose:
+//   - session_key: no same-tick Info reader.
+//   - continuation_reset_pending: the awake scan reads info.ContinuationResetPending
+//     (a Step-3 read, NOT introduced by 5a). Its residue can defer the
+//     continuation-reset classification by one self-healing tick when the session
+//     carries a durable reset_committed_at (RestartRequestPatch stamps it; no path
+//     clears it) — a pre-existing Step-3/6d coherence gap, #2345-class, that 5a
+//     neither introduces nor changes. Threading it would alter awake-scan behavior
+//     versus the current snapshot and belongs to that separate cleanup, not this
+//     commit. It self-heals on the next tick's store reload.
+func pendingCreateResidueFold(session *beads.Bead) map[string]string {
+	if session == nil {
+		return nil
+	}
+	fold := map[string]string{"started_config_hash": session.Metadata["started_config_hash"]}
+	if tok := session.Metadata["instance_token"]; tok != "" {
+		fold["instance_token"] = tok
+	}
+	return fold
 }
 
 func shouldRollbackPendingCreate(session *beads.Bead) bool {
@@ -2182,6 +2244,14 @@ func shouldRollbackPendingCreate(session *beads.Bead) bool {
 		return false
 	}
 	return strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true"
+}
+
+// shouldRollbackPendingCreateInfo is the session.Info sibling of
+// shouldRollbackPendingCreate. Info.PendingCreateClaim already projects the
+// trimmed pending_create_claim == "true" flag, so the nil-bead guard (which only
+// mattered for a nil pointer) collapses to reading the field. Equivalence-proven.
+func shouldRollbackPendingCreateInfo(i sessionpkg.Info) bool {
+	return i.PendingCreateClaim
 }
 
 func runningSessionMatchesPendingCreate(session *beads.Bead, sessionName string, sp runtime.Provider) bool {
@@ -2220,46 +2290,65 @@ func runningSessionMatchesPendingCreate(session *beads.Bead, sessionName string,
 	return expectedToken != "" && liveToken == expectedToken
 }
 
-func rollbackPendingCreate(session *beads.Bead, sessFront *sessionpkg.InfoStore, now time.Time, stderr io.Writer) {
+// rollbackPendingCreate returns the metadata batch it mirrored onto the raw bead
+// (last_woke_at="" + conditional session_name="") so the reconciler can fold it
+// onto the typed snapshot (Step 6d write-returns-Info). NOTE: closeBead is
+// STORE-ONLY (it never sets *session.Status), so the raw bead stays open and the
+// returned batch deliberately carries NO Closed change — matching what a raw
+// re-projection of *session sees. The Closed reconstruction is the separate
+// Get-cutover concern, not a pre-pass fold.
+func rollbackPendingCreate(session *beads.Bead, sessFront *sessionpkg.Store, now time.Time, stderr io.Writer) map[string]string {
 	if session == nil || sessFront == nil {
-		return
+		return nil
 	}
-	clearPendingStartInFlightLease(session, sessFront, stderr)
+	batch := clearPendingStartInFlightLease(session, sessFront, stderr)
 	if strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
 		if setMeta(sessFront, session.ID, "session_name", "", stderr) == nil {
 			if session.Metadata == nil {
 				session.Metadata = make(map[string]string)
 			}
 			session.Metadata["session_name"] = ""
+			batch = mergeMetadataPatch(batch, map[string]string{"session_name": ""})
 		}
 	}
 	closeBead(sessFront.Store().Store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
+	return batch
 }
 
-func rollbackPendingCreateClearingClaim(session *beads.Bead, sessFront *sessionpkg.InfoStore, now time.Time, stderr io.Writer) {
+// rollbackPendingCreateClearingClaim is rollbackPendingCreate plus the
+// failed-create ClosePatch metadata + claim clears mirrored onto the raw bead
+// when the store-only close succeeds. Returns the full mirrored batch (again with
+// NO Closed change — closeFailedCreateBead is store-only, so *session.Status stays
+// open) for the snapshot fold.
+func rollbackPendingCreateClearingClaim(session *beads.Bead, sessFront *sessionpkg.Store, now time.Time, stderr io.Writer) map[string]string {
 	if session == nil || sessFront == nil {
-		return
+		return nil
 	}
-	clearPendingStartInFlightLease(session, sessFront, stderr)
+	batch := clearPendingStartInFlightLease(session, sessFront, stderr)
 	if strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
 		if setMeta(sessFront, session.ID, "session_name", "", stderr) == nil {
 			if session.Metadata == nil {
 				session.Metadata = make(map[string]string)
 			}
 			session.Metadata["session_name"] = ""
+			batch = mergeMetadataPatch(batch, map[string]string{"session_name": ""})
 		}
 	}
 	if !closeFailedCreateBead(sessFront, session.ID, now, stderr) {
-		return
+		return batch
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string)
 	}
-	for key, value := range sessionpkg.ClosePatch(now.UTC(), string(sessionpkg.StateFailedCreate)) {
+	closePatch := sessionpkg.ClosePatch(now.UTC(), string(sessionpkg.StateFailedCreate))
+	for key, value := range closePatch {
 		session.Metadata[key] = value
 	}
 	session.Metadata["pending_create_claim"] = ""
 	session.Metadata["pending_create_started_at"] = ""
+	batch = mergeMetadataPatch(batch, closePatch)
+	batch = mergeMetadataPatch(batch, map[string]string{"pending_create_claim": "", "pending_create_started_at": ""})
+	return batch
 }
 
 func executePlannedStarts(
@@ -2304,7 +2393,7 @@ func executePlannedStartsTraced(
 	// the session-only leaves (circuit metadata, lease clears, commit writes);
 	// nil when store is nil so those leaves keep their store==nil short-circuit.
 	// The raw store stays for the dependency/worker reads this driver also does.
-	var sessFront *sessionpkg.InfoStore
+	var sessFront *sessionpkg.Store
 	if store != nil {
 		sessFront = sessionFrontDoor(store)
 	}
@@ -2426,18 +2515,18 @@ func executePlannedStartsTraced(
 							if done != nil {
 								done()
 							}
-							if err := persistSessionCircuitBreakerMetadata(sessFront, candidate.session, cb, identity, cbNow); err != nil {
+							if err := persistSessionCircuitBreakerMetadata(sessFront, candidate.session.ID, cb, identity, cbNow); err != nil {
 								fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
 							}
 							cb.LogOpenOnce(identity, stderr)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.circuit_open", candidate.tp.TemplateName, candidate.name(), "circuit_open", "skipped", traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerCircuitOpen, TraceReasonCircuitOpen, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
 									"identity": identity,
-								}, nil, "")
+								})
 							}
 							continue
 						}
-						state, err := recordSessionCircuitBreakerRestart(sessFront, candidate.session, cb, identity, cbNow)
+						state, err := recordSessionCircuitBreakerRestart(sessFront, candidate.session.ID, cb, identity, cbNow)
 						if err != nil {
 							if release != nil {
 								release()
@@ -2458,9 +2547,9 @@ func executePlannedStartsTraced(
 							}
 							cb.LogOpenOnce(identity, stderr)
 							if trace != nil {
-								trace.recordDecision("reconciler.session.circuit_trip", candidate.tp.TemplateName, candidate.name(), "circuit_trip", "skipped", traceRecordPayload{
+								trace.RecordDecision(TraceSiteReconcilerCircuitTrip, TraceReasonCircuitTrip, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
 									"identity": identity,
-								}, nil, "")
+								})
 							}
 							continue
 						}
@@ -2500,10 +2589,10 @@ func executePlannedStartsTraced(
 			}
 			for _, result := range results {
 				if trace != nil {
-					trace.recordOperation("reconciler.start.execute", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), "", "start", result.outcome, traceRecordPayload{
+					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, TraceOutcomeCode(result.outcome), "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{
 						"rollback_pending": result.rollbackPending,
 						"duration_ms":      result.finished.Sub(result.started).Milliseconds(),
-					}, "")
+					})
 				}
 				if result.outcome == "start_enqueued" {
 					logLifecycleOutcome(stderr, "start", wave, result.prepared.candidate.name(), result.prepared.candidate.logicalTemplate(cfg), result.outcome, result.started, result.finished, nil)
@@ -2961,7 +3050,7 @@ func cityStopSessionMarked(store beads.Store, sessionID string) bool {
 	return strings.TrimSpace(b.Metadata["sleep_reason"]) == sleepReasonCityStop
 }
 
-func markCityStopSessionAsAsleep(sessFront *sessionpkg.InfoStore, sessionID string, stderr io.Writer) {
+func markCityStopSessionAsAsleep(sessFront *sessionpkg.Store, sessionID string, stderr io.Writer) {
 	if sessFront == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
