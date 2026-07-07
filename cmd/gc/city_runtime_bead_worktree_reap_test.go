@@ -101,7 +101,11 @@ func TestCityRuntimeTick_AttemptsClosedBeadWorktreeReapWhenEnabled(t *testing.T)
 	enabled := true
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test", Prefix: "ga"},
-		Daemon:    config.DaemonConfig{AutoReapClosedBeadWorktrees: &enabled},
+		// Provide a rig entry so that lookupRigRoot can resolve "mrig" to a
+		// path. Without this, the reaper would log "rig not in config" and
+		// skip before reaching the removal attempt.
+		Rigs:   []config.Rig{{Name: "mrig", Path: cityPath}},
+		Daemon: config.DaemonConfig{AutoReapClosedBeadWorktrees: &enabled},
 	}
 
 	cityStore := beads.NewMemStore()
@@ -132,5 +136,35 @@ func TestCityRuntimeTick_AttemptsClosedBeadWorktreeReapWhenEnabled(t *testing.T)
 	// non-git dir is treated as dirty. This proves the gate fires when enabled.
 	if !strings.Contains(stderr.String(), "reapClosedBeadWorktrees: skipping") {
 		t.Errorf("stderr = %q, want reaper skipping-log proving gate fires when enabled", stderr.String())
+	}
+}
+
+// TestLookupRigRoot covers the new helper introduced to fix the bead worktree
+// reaper using cityPath instead of the rig root for git worktree remove calls.
+func TestLookupRigRoot(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "hecke", Path: "/gt/hecke"},
+			{Name: "demo", Path: "  /gt/demo  "}, // leading/trailing space trimmed
+			{Name: "empty", Path: ""},
+		},
+	}
+	cases := []struct {
+		rigName string
+		want    string
+	}{
+		{"hecke", "/gt/hecke"},
+		{"demo", "/gt/demo"},  // whitespace trimmed
+		{"empty", ""},         // empty path → ""
+		{"missing", ""},       // not in config → ""
+		{"", ""},              // blank name → ""
+	}
+	for _, c := range cases {
+		t.Run(c.rigName, func(t *testing.T) {
+			got := lookupRigRoot(c.rigName, cfg)
+			if got != c.want {
+				t.Errorf("lookupRigRoot(%q) = %q, want %q", c.rigName, got, c.want)
+			}
+		})
 	}
 }
