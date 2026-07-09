@@ -387,14 +387,12 @@ func (c *CachingStore) runReconciliation() {
 				})
 			}
 
-			c.beads[id] = cloneBead(freshBead)
-			c.deps[id] = cloneDeps(freshDeps)
-			delete(c.dirty, id)
-			delete(c.deletedSeq, id)
-			if !recentLocalMutation(c.localBeadAt[id], now) {
-				delete(c.beadSeq, id)
-				delete(c.localBeadAt, id)
-			}
+			c.absorbFreshLocked(id, freshBead, now, absorbOpts{
+				depsMode:   depsExplicit,
+				deps:       freshDeps,
+				seqMode:    seqClearGuarded,
+				clearDirty: true,
+			})
 		}
 
 		for id, old := range c.beads {
@@ -419,12 +417,7 @@ func (c *CachingStore) runReconciliation() {
 					bead:      closed,
 				})
 			}
-			delete(c.beads, id)
-			delete(c.deps, id)
-			delete(c.dirty, id)
-			delete(c.deletedSeq, id)
-			delete(c.beadSeq, id)
-			delete(c.localBeadAt, id)
+			c.evictLocked(id)
 		}
 
 		c.syncFailures = 0
