@@ -87,6 +87,29 @@ const (
 	// orderTrackingRetentionWatchdogDeleteBudget bounds the number of
 	// closed order-tracking beads deleted per watchdog invocation.
 	orderTrackingRetentionWatchdogDeleteBudget = 100
+
+	// latchSkipLogInterval is the minimum interval between repeated "order
+	// skipped: latch open" log lines for the same order. Without this, a
+	// permanently-latched order logs once per tick (~1s), flooding stderr.
+	latchSkipLogInterval = 5 * time.Minute
+
+	// latchStaleWispSweepAfter is the age at which a blocking open tracking
+	// bead is treated as a stale wisp. When the latch has been held longer
+	// than this threshold, the dispatch loop calls sweepStaleOrderTracking for
+	// that order to clear the blocking bead so dispatch can resume on the next
+	// tick. This mirrors the manual "gc order sweep-tracking --stale-after"
+	// step that unblocked formula orders after the 2026-07-05 freeze.
+	latchStaleWispSweepAfter = defaultOrderTrackingSweepStaleAfter
+
+	// latchStaleWispSweepBudget bounds how many tracking beads the inline
+	// stale-wisp sweep closes per order per sweep. Keeping this small prevents
+	// a busy store from blocking the dispatch loop for a meaningful amount of
+	// time.
+	latchStaleWispSweepBudget = 2
+
+	// latchSweepInitiator is the metadata value stamped on stale-wisp sweeps
+	// triggered inline by the dispatch latch check.
+	latchSweepInitiator = "dispatch-latch-sweep"
 )
 
 // defaultOrderTrackingDeleteAfterClose is derived from the canonical config
@@ -288,6 +311,8 @@ type memoryOrderDispatcher struct {
 	cacheMu              sync.Mutex
 	lastRunCache         map[string]time.Time
 	gateBackoffUntil     map[string]time.Time
+	latchSkipLogAt       map[string]time.Time
+	latchSweepAt         map[string]time.Time
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -541,6 +566,43 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 		}
 		if hasOpenTracking {
+			// Emit a rate-limited log so operators can see that a latch is
+			// blocking dispatch — previously this was a silent continue that
+			// made formula orders disappear with no trace (gt-pzbm6 / C.9).
+			m.cacheMu.Lock()
+			shouldLog := m.latchSkipShouldLog(scoped, now)
+			var doSweep bool
+			var sweepAge time.Duration
+			if shouldLog {
+				// Compute bead age from the history index's lastRun.
+				// lastRun holds the CreatedAt of the most recent tracking bead,
+				// which is the best approximation we have of when the blocking
+				// bead was created without a separate store round-trip.
+				lastRun := trackingIndex.knownLastRun(storesForGate, storeKeysForGate, scoped)
+				if !lastRun.IsZero() {
+					sweepAge = now.Sub(lastRun)
+				}
+				doSweep = m.latchSweepShouldRun(scoped, sweepAge, now)
+			}
+			m.cacheMu.Unlock()
+			if shouldLog {
+				if sweepAge > 0 {
+					logDispatchError(m.stderr, "gc: order dispatch: %s skipped: open tracking bead (age %s); waiting for prior run to complete", scoped, sweepAge.Round(time.Second))
+				} else {
+					logDispatchError(m.stderr, "gc: order dispatch: %s skipped: open tracking bead; waiting for prior run to complete", scoped)
+				}
+			}
+			if doSweep {
+				// The blocking tracking bead is older than latchStaleWispSweepAfter.
+				// Treat it as a stale wisp and sweep it so the order can resume on
+				// the next tick. This mirrors the manual fix that unblocked formula
+				// orders after the 2026-07-05 freeze (gt-pzbm6 / C.9).
+				logDispatchError(m.stderr, "gc: order dispatch: %s latch stale (age %s); sweeping up to %d stale tracking bead(s)", scoped, sweepAge.Round(time.Second), latchStaleWispSweepBudget)
+				only := map[string]struct{}{scoped: {}}
+				if _, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(storesForGate, now, latchStaleWispSweepAfter, only, latchSweepInitiator, false, latchStaleWispSweepBudget); sweepErr != nil {
+					logDispatchError(m.stderr, "gc: order dispatch: %s latch sweep error: %v", scoped, sweepErr)
+				}
+			}
 			continue
 		}
 
@@ -635,6 +697,16 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 		}
 		if hasOpenWork {
+			// Rate-limited log so operators can see the work-gate is blocking
+			// dispatch (gt-pzbm6 / C.9). The open-work gate fires after the
+			// due check, so this covers the wisp-root case: wisps whose child
+			// step beads are still open hold the gate and suppress re-fire.
+			m.cacheMu.Lock()
+			shouldLogWork := m.latchSkipShouldLog("work:"+scoped, now)
+			m.cacheMu.Unlock()
+			if shouldLogWork {
+				logDispatchError(m.stderr, "gc: order dispatch: %s skipped: open work bead (wisp or tracking); waiting for prior wisp to complete", scoped)
+			}
 			continue
 		}
 
@@ -901,6 +973,31 @@ func (idx *orderDispatchTrackingIndex) lastRunForStore(store beads.Store, storeK
 	return time.Time{}, nil
 }
 
+// knownLastRun returns the best-known last-run time for scopedName from the
+// in-memory history index, without issuing any store queries. It returns the
+// zero time when the index has no entry. Call this from the latch-skip path
+// to estimate blocking-bead age without adding a store round-trip.
+func (idx *orderDispatchTrackingIndex) knownLastRun(stores []beads.Store, storeKeys []string, scopedName string) time.Time {
+	if idx == nil {
+		return time.Time{}
+	}
+	var latest time.Time
+	for i := range stores {
+		key := indexStoreKey(storeKeys, i)
+		// Only read from what is already in the cache; do not trigger a load.
+		idx.mu.Lock()
+		hist, ok := idx.entries[key+"\x00history"]
+		idx.mu.Unlock()
+		if !ok {
+			continue
+		}
+		if summary, ok := hist[scopedName]; ok && summary.lastRun.After(latest) {
+			latest = summary.lastRun
+		}
+	}
+	return latest
+}
+
 func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
 	key := storeKey + "\x00history"
 	idx.mu.Lock()
@@ -1117,6 +1214,47 @@ func (m *memoryOrderDispatcher) carryGateBackoffFrom(prev *memoryOrderDispatcher
 			}
 		}
 	}
+}
+
+// latchSkipShouldLog reports whether it is time to emit a latch-skip log line
+// for the named order. The first skip is silent to avoid noise from legitimate
+// short-term suppression (trigger-env-failure, in-flight work). A log fires
+// only after the latch has been held for at least latchSkipLogInterval, then
+// repeats at that interval. Call under cacheMu.
+func (m *memoryOrderDispatcher) latchSkipShouldLog(key string, now time.Time) bool {
+	if m.latchSkipLogAt == nil {
+		m.latchSkipLogAt = make(map[string]time.Time)
+	}
+	first, seen := m.latchSkipLogAt[key]
+	if !seen {
+		// Record first-seen time; do not log yet — wait for the interval.
+		m.latchSkipLogAt[key] = now
+		return false
+	}
+	// Log once the latch has been held for the full interval.
+	if now.Before(first.Add(latchSkipLogInterval)) {
+		return false
+	}
+	m.latchSkipLogAt[key] = now
+	return true
+}
+
+// latchSweepShouldRun reports whether the inline stale-wisp sweep should run
+// for the named order given the age of its blocking tracking bead. The sweep
+// fires at most once per latchSkipLogInterval per order to avoid a tight
+// close-then-recheck loop on a hot store. Call under cacheMu.
+func (m *memoryOrderDispatcher) latchSweepShouldRun(key string, beadAge time.Duration, now time.Time) bool {
+	if beadAge < latchStaleWispSweepAfter {
+		return false
+	}
+	if m.latchSweepAt == nil {
+		m.latchSweepAt = make(map[string]time.Time)
+	}
+	if last, ok := m.latchSweepAt[key]; ok && now.Before(last.Add(latchSkipLogInterval)) {
+		return false
+	}
+	m.latchSweepAt[key] = now
+	return true
 }
 
 func orderHistoryCacheKey(orderName string, storeKeys []string) string {
