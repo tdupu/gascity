@@ -3069,6 +3069,11 @@ For managed-Dolt rigs, runs an idempotent config sync (registers types.custom
 and other config into the DB, never destructively reinitializes). The git repo
 check remains informational.
 
+Note: --adopt adopts the store, not the work. Pre-existing beads in the adopted
+store are not brought into city formula workflows. Importing existing beads into
+city formula workflows is not currently supported or planned; run new work
+through formulas from this point forward.
+
 ```
 gc rig add <path> [flags]
 ```
