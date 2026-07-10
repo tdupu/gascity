@@ -137,13 +137,50 @@ func uninstalledImportHint(input string, cfg *config.City) string {
 	return fmt.Sprintf("\n  the %q pack is imported (%s) but its agents are not installed here; run `gc import install`", binding, src)
 }
 
+// rigQualifiedHint returns a hint when an unqualified agent name matches
+// one or more rig-qualified agents exactly. For example, if the user types
+// "gc.run-operator" and the city has "hecke/gc.run-operator", the hint
+// reads: `; to target hecke rig use "hecke/gc.run-operator"`. When
+// multiple rigs carry the same name, each qualified form is listed.
+// Returns "" when the input already contains a rig prefix or when no
+// exact rig-qualified match exists.
+func rigQualifiedHint(input string, cfg *config.City) string {
+	if cfg == nil || strings.Contains(input, "/") {
+		return ""
+	}
+	var matches []string
+	for _, a := range cfg.Agents {
+		qn := a.QualifiedName()
+		if a.Dir != "" && a.BindingQualifiedName() == input {
+			matches = append(matches, qn)
+		}
+	}
+	if len(matches) == 0 {
+		return ""
+	}
+	if len(matches) == 1 {
+		dir, _ := config.ParseQualifiedName(matches[0])
+		return fmt.Sprintf("; to target %s rig use %q", dir, matches[0])
+	}
+	quoted := make([]string, len(matches))
+	for i, m := range matches {
+		quoted[i] = fmt.Sprintf("%q", m)
+	}
+	return fmt.Sprintf("; rig-qualified forms: %s", strings.Join(quoted, ", "))
+}
+
 // agentNotFoundMsg returns a user-friendly error string for when an agent
 // name is not found. When the target names a declared-but-uninstalled pack
-// import it surfaces the `gc import install` repair; otherwise it falls back to
-// a "did you mean?" hint and the available-agents list.
+// import it surfaces the `gc import install` repair; when an unqualified
+// name matches rig-scoped agents exactly it surfaces the rig-qualified
+// form(s); otherwise it falls back to a "did you mean?" hint and the
+// available-agents list.
 func agentNotFoundMsg(prefix, input string, cfg *config.City) string {
 	base := fmt.Sprintf("%s: agent %q not found in city.toml", prefix, input)
 	if hint := uninstalledImportHint(input, cfg); hint != "" {
+		return base + hint
+	}
+	if hint := rigQualifiedHint(input, cfg); hint != "" {
 		return base + hint
 	}
 	names := availableAgentNames(cfg)

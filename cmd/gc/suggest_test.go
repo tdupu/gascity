@@ -187,6 +187,79 @@ func TestAgentNotFoundMsgUninstalledImportHint(t *testing.T) {
 	}
 }
 
+// TestRigQualifiedHint covers the case where an unqualified agent name
+// matches rig-scoped agents — the hint should surface the rig-qualified
+// form(s) rather than a generic "did you mean?" suggestion.
+func TestRigQualifiedHint(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor"},
+			{Name: "run-operator", Dir: "hecke"},
+		},
+	}
+
+	// Unqualified name that matches exactly one rig-scoped agent.
+	if hint := rigQualifiedHint("run-operator", cfg); !strings.Contains(hint, "hecke") {
+		t.Errorf("should mention hecke rig: %q", hint)
+	}
+	if hint := rigQualifiedHint("run-operator", cfg); !strings.Contains(hint, "hecke/run-operator") {
+		t.Errorf("should include qualified name: %q", hint)
+	}
+
+	// Already-qualified input → no hint.
+	if hint := rigQualifiedHint("hecke/run-operator", cfg); hint != "" {
+		t.Errorf("already-qualified input should produce no hint, got %q", hint)
+	}
+
+	// Unqualified name with no match → no hint.
+	if hint := rigQualifiedHint("unknown-agent", cfg); hint != "" {
+		t.Errorf("no match should produce no hint, got %q", hint)
+	}
+
+	// City-scoped (no Dir) agent → no hint (it would be found by lookup).
+	if hint := rigQualifiedHint("mayor", cfg); hint != "" {
+		t.Errorf("city-scoped agent should produce no hint, got %q", hint)
+	}
+
+	// Multiple rigs carry the same agent name → list both qualified forms.
+	multi := &config.City{
+		Agents: []config.Agent{
+			{Name: "run-operator", Dir: "hecke"},
+			{Name: "run-operator", Dir: "langlands"},
+		},
+	}
+	hint := rigQualifiedHint("run-operator", multi)
+	if !strings.Contains(hint, "hecke/run-operator") {
+		t.Errorf("multi-rig hint should include hecke form: %q", hint)
+	}
+	if !strings.Contains(hint, "langlands/run-operator") {
+		t.Errorf("multi-rig hint should include langlands form: %q", hint)
+	}
+}
+
+// TestAgentNotFoundMsgRigQualified verifies that agentNotFoundMsg emits the
+// rig-qualified hint (not "did you mean?") when an unqualified name matches
+// a rig-scoped agent exactly.
+func TestAgentNotFoundMsgRigQualified(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor"},
+			{Name: "run-operator", Dir: "hecke"},
+		},
+	}
+
+	msg := agentNotFoundMsg("gc sling", "run-operator", cfg)
+	if !strings.Contains(msg, "hecke") {
+		t.Errorf("should mention hecke rig: %q", msg)
+	}
+	if !strings.Contains(msg, "hecke/run-operator") {
+		t.Errorf("should include qualified name: %q", msg)
+	}
+	if strings.Contains(msg, "did you mean") {
+		t.Errorf("should not emit generic did-you-mean when exact rig match found: %q", msg)
+	}
+}
+
 func TestRigNotFoundMsg(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{
