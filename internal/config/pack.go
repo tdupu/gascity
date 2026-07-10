@@ -2764,6 +2764,7 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		SessionSetupScript:      ov.SessionSetupScript,
 		SessionLive:             ov.SessionLive,
 		OverlayDir:              ov.OverlayDir,
+		SlingQuery:              ov.SlingQuery,
 		DefaultSlingFormula:     ov.DefaultSlingFormula,
 		InjectFragments:         ov.InjectFragments,
 		AppendFragments:         ov.AppendFragments,

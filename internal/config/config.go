@@ -732,6 +732,11 @@ type AgentOverride struct {
 	// Relative paths resolve against the declaring config file's directory
 	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
+	// SlingQuery overrides the sling_query command template used to route a bead
+	// to this agent. Supports the same Go template placeholders as the agent-level
+	// sling_query field (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName).
+	// The placeholder {} is replaced with the bead ID at runtime.
+	SlingQuery *string `toml:"sling_query,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
 	// InjectFragments overrides the agent's inject_fragments list. Leave this
