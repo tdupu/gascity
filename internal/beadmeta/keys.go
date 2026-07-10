@@ -127,6 +127,11 @@ const (
 	OnExhaustedMetadataKey               = "gc.on_exhausted"
 	OnFailMetadataKey                    = "gc.on_fail"
 	OriginalKindMetadataKey              = "gc.original_kind"
+	// OriginMetadataKey marks the provenance of a bead. Value "user" indicates
+	// the bead was explicitly promoted to user-origin status (i.e. it originated
+	// from a human, not from engine infrastructure). Stamped by `gc beads promote`
+	// and by the gc bead promote pack formula (B.4 / C.5).
+	OriginMetadataKey                    = "gc.origin"
 	OutcomeBeadIDMetadataKey             = "gc.outcome_bead_id"
 	OutcomeMetadataKey                   = "gc.outcome"
 	OutputJSONMetadataKey                = "gc.output_json"
@@ -358,6 +363,7 @@ var KnownMetadataKeys = []string{
 	OnExhaustedMetadataKey,
 	OnFailMetadataKey,
 	OriginalKindMetadataKey,
+	OriginMetadataKey,
 	OutcomeBeadIDMetadataKey,
 	OutcomeMetadataKey,
 	OutputJSONMetadataKey,
