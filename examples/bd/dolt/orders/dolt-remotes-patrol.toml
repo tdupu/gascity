@@ -3,3 +3,8 @@ description = "Push dolt databases to configured remotes"
 trigger = "cooldown"
 interval = "15m"
 exec = "gc dolt sync"
+# Explicit exec timeout (gt-svcu1): gc dolt sync loops over all city
+# databases (~15 DBs); at ~30s/fetch × 15 DBs the run takes 4-5+ min.
+# The Go default for exec orders is 300s, which is shorter than the
+# observed run duration for large deployments. 15m gives safe headroom.
+timeout = "15m"
