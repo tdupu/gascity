@@ -3684,3 +3684,134 @@ func TestOrderCheckCooldownStaleEventFallsThroughToLastRunStore(t *testing.T) {
 		t.Fatalf("stale event did not fall through to last-run store; expected last-run error in stderr:\n%s", stderr.String())
 	}
 }
+
+// --- gc order set-interval ---
+
+func TestOrderSetIntervalInvalidDuration(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSetInterval("digest", "not-a-duration", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("cmdOrderSetInterval = 0, want non-zero for invalid duration")
+	}
+	if !strings.Contains(stderr.String(), "invalid duration") {
+		t.Errorf("stderr = %q, want 'invalid duration'", stderr.String())
+	}
+}
+
+func TestOrderSetIntervalWritesCityToml(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test"
+prefix = "tt"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSetInterval("digest", "2h", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSetInterval = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "digest") || !strings.Contains(stdout.String(), "2h") {
+		t.Errorf("stdout = %q, missing order name or interval", stdout.String())
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig after set-interval: %v", err)
+	}
+	var found *config.OrderOverride
+	for i := range cfg.Orders.Overrides {
+		if cfg.Orders.Overrides[i].Name == "digest" {
+			found = &cfg.Orders.Overrides[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no override for 'digest' in city.toml after set-interval")
+	}
+	if found.Interval == nil || *found.Interval != "2h" {
+		t.Errorf("override.Interval = %v, want \"2h\"", found.Interval)
+	}
+}
+
+func TestOrderSetIntervalWithRigWritesCityToml(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test"
+prefix = "tt"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSetInterval("health-check", "30m", "frontend", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSetInterval = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "frontend") {
+		t.Errorf("stdout = %q, missing rig name", stdout.String())
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig after set-interval: %v", err)
+	}
+	var found *config.OrderOverride
+	for i := range cfg.Orders.Overrides {
+		if cfg.Orders.Overrides[i].Name == "health-check" && cfg.Orders.Overrides[i].Rig == "frontend" {
+			found = &cfg.Orders.Overrides[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no override for 'health-check' rig=frontend in city.toml after set-interval")
+	}
+	if found.Interval == nil || *found.Interval != "30m" {
+		t.Errorf("override.Interval = %v, want \"30m\"", found.Interval)
+	}
+}
+
+func TestOrderSetIntervalUpdatesExistingOverride(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test"
+prefix = "tt"
+
+[[orders.overrides]]
+name = "digest"
+interval = "24h"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSetInterval("digest", "12h", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSetInterval = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig after set-interval: %v", err)
+	}
+	var found *config.OrderOverride
+	for i := range cfg.Orders.Overrides {
+		if cfg.Orders.Overrides[i].Name == "digest" {
+			found = &cfg.Orders.Overrides[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no override for 'digest' after update")
+	}
+	if found.Interval == nil || *found.Interval != "12h" {
+		t.Errorf("override.Interval = %v, want \"12h\"", found.Interval)
+	}
+	overrideCount := 0
+	for _, ov := range cfg.Orders.Overrides {
+		if ov.Name == "digest" {
+			overrideCount++
+		}
+	}
+	if overrideCount != 1 {
+		t.Errorf("override count for 'digest' = %d, want 1 (no duplicates)", overrideCount)
+	}
+}
