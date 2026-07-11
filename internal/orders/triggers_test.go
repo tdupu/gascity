@@ -515,3 +515,149 @@ func TestMaxSeqFromLabelsEmpty(t *testing.T) {
 		})
 	}
 }
+
+// TestClampInterval verifies hint clamping to [interval_min, interval_max].
+func TestClampInterval(t *testing.T) {
+	tests := []struct {
+		name     string
+		hint     time.Duration
+		min      string
+		max      string
+		fallback time.Duration
+		want     time.Duration
+	}{
+		{
+			name:     "hint within bounds",
+			hint:     2 * time.Minute,
+			min:      "1m",
+			max:      "5m",
+			fallback: 5 * time.Minute,
+			want:     2 * time.Minute,
+		},
+		{
+			name:     "hint below min is raised to min",
+			hint:     30 * time.Second,
+			min:      "1m",
+			max:      "5m",
+			fallback: 5 * time.Minute,
+			want:     time.Minute,
+		},
+		{
+			name:     "hint above max is lowered to max",
+			hint:     10 * time.Minute,
+			min:      "1m",
+			max:      "5m",
+			fallback: 5 * time.Minute,
+			want:     5 * time.Minute,
+		},
+		{
+			name:     "no bounds — hint passes through",
+			hint:     3 * time.Minute,
+			min:      "",
+			max:      "",
+			fallback: 5 * time.Minute,
+			want:     3 * time.Minute,
+		},
+		{
+			name:     "only min set — hint below is raised",
+			hint:     30 * time.Second,
+			min:      "1m",
+			max:      "",
+			fallback: 5 * time.Minute,
+			want:     time.Minute,
+		},
+		{
+			name:     "only max set — hint above is lowered",
+			hint:     10 * time.Minute,
+			min:      "",
+			max:      "5m",
+			fallback: 5 * time.Minute,
+			want:     5 * time.Minute,
+		},
+		{
+			name:     "zero hint returns fallback",
+			hint:     0,
+			min:      "1m",
+			max:      "5m",
+			fallback: 5 * time.Minute,
+			want:     5 * time.Minute,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := clampInterval(tt.hint, tt.min, tt.max, tt.fallback)
+			if got != tt.want {
+				t.Errorf("clampInterval(%v, %q, %q, %v) = %v, want %v",
+					tt.hint, tt.min, tt.max, tt.fallback, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckTriggerCooldownHintWithinBounds verifies that a valid hint within
+// [interval_min, interval_max] is used as the effective interval.
+func TestCheckTriggerCooldownHintWithinBounds(t *testing.T) {
+	a := Order{
+		Name:        "sweep",
+		Trigger:     "cooldown",
+		Interval:    "5m",
+		IntervalMin: "1m",
+		IntervalMax: "5m",
+	}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	lastRun := now.Add(-3 * time.Minute) // 3m ago — would NOT be due at 5m, but IS due at 2m hint
+
+	lastRunFn := func(_ string) (time.Time, error) { return lastRun, nil }
+	hintFn := func(_ string) (string, error) { return "2m", nil }
+
+	result := CheckTriggerWithOptions(a, now, lastRunFn, nil, nil, TriggerOptions{HintFn: hintFn})
+	if !result.Due {
+		t.Errorf("Due = false, want true: 3m elapsed should exceed 2m hint; reason=%q", result.Reason)
+	}
+}
+
+// TestCheckTriggerCooldownHintClampedToMin verifies that a hint below interval_min
+// is raised to interval_min.
+func TestCheckTriggerCooldownHintClampedToMin(t *testing.T) {
+	a := Order{
+		Name:        "sweep",
+		Trigger:     "cooldown",
+		Interval:    "5m",
+		IntervalMin: "2m",
+		IntervalMax: "5m",
+	}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	// hint says 30s, but min is 2m — effective interval should be 2m
+	// elapsed is 90s: not due at 2m, which proves the min floor is enforced
+	lastRun := now.Add(-90 * time.Second)
+
+	lastRunFn := func(_ string) (time.Time, error) { return lastRun, nil }
+	hintFn := func(_ string) (string, error) { return "30s", nil }
+
+	result := CheckTriggerWithOptions(a, now, lastRunFn, nil, nil, TriggerOptions{HintFn: hintFn})
+	if result.Due {
+		t.Errorf("Due = true, want false: 90s elapsed should not exceed 2m min; reason=%q", result.Reason)
+	}
+}
+
+// TestCheckTriggerCooldownFallsBackOnMissingHint verifies that when the hint
+// function returns an empty string the static Interval is used.
+func TestCheckTriggerCooldownFallsBackOnMissingHint(t *testing.T) {
+	a := Order{
+		Name:        "sweep",
+		Trigger:     "cooldown",
+		Interval:    "5m",
+		IntervalMin: "1m",
+		IntervalMax: "10m",
+	}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	lastRun := now.Add(-3 * time.Minute) // 3m ago — not due at static 5m
+
+	lastRunFn := func(_ string) (time.Time, error) { return lastRun, nil }
+	hintFn := func(_ string) (string, error) { return "", nil } // no hint
+
+	result := CheckTriggerWithOptions(a, now, lastRunFn, nil, nil, TriggerOptions{HintFn: hintFn})
+	if result.Due {
+		t.Errorf("Due = true, want false: 3m elapsed should not exceed 5m static interval; reason=%q", result.Reason)
+	}
+}

@@ -39,6 +39,20 @@ type Order struct {
 	Trigger string `toml:"trigger"`
 	// Interval is the minimum time between runs (for cooldown triggers). Go duration string.
 	Interval string `toml:"interval,omitempty"`
+	// IntervalMin, when set alongside IntervalMax, clamps the dynamic
+	// next_interval_hint written by order scripts. The effective cooldown
+	// is max(IntervalMin, min(IntervalMax, hint)); falls back to Interval
+	// when no hint is present. Go duration strings (e.g. "30s", "5m").
+	IntervalMin string `toml:"interval_min,omitempty"`
+	// IntervalMax is the upper bound for dynamic interval hints. See IntervalMin.
+	IntervalMax string `toml:"interval_max,omitempty"`
+	// AlertAfter, when set, overrides the 1.5× implicit warning threshold used
+	// by gc doctor. Decouples the doctor's alerting window from the effective
+	// firing interval. Go duration string (e.g. "15m"). Empty means use 1.5×.
+	AlertAfter string `toml:"alert_after,omitempty"`
+	// CriticalAfter, when set, overrides the 3× implicit critical threshold
+	// used by gc doctor. Go duration string (e.g. "30m"). Empty means use 3×.
+	CriticalAfter string `toml:"critical_after,omitempty"`
 	// Schedule is a cron-like expression (for cron triggers).
 	Schedule string `toml:"schedule,omitempty"`
 	// Check is a shell command that returns exit 0 when the formula should run (for condition triggers).
@@ -100,23 +114,27 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description string                `toml:"description,omitempty"`
-	Formula     string                `toml:"formula,omitempty"`
-	Exec        string                `toml:"exec,omitempty"`
-	Scope       string                `toml:"scope,omitempty"`
-	Trigger     string                `toml:"trigger,omitempty"`
-	Gate        string                `toml:"gate,omitempty"`
-	Interval    string                `toml:"interval,omitempty"`
-	Schedule    string                `toml:"schedule,omitempty"`
-	Check       string                `toml:"check,omitempty"`
-	On          string                `toml:"on,omitempty"`
-	Pool        string                `toml:"pool,omitempty"`
-	Timeout     string                `toml:"timeout,omitempty"`
-	Enabled     *bool                 `toml:"enabled,omitempty"`
-	Idempotent  bool                  `toml:"idempotent,omitempty"`
-	Env         map[string]string     `toml:"env,omitempty"`
-	Params      map[string]OrderParam `toml:"params,omitempty"`
-	SkipAliases []string              `toml:"skip_aliases,omitempty"`
+	Description   string                `toml:"description,omitempty"`
+	Formula       string                `toml:"formula,omitempty"`
+	Exec          string                `toml:"exec,omitempty"`
+	Scope         string                `toml:"scope,omitempty"`
+	Trigger       string                `toml:"trigger,omitempty"`
+	Gate          string                `toml:"gate,omitempty"`
+	Interval      string                `toml:"interval,omitempty"`
+	IntervalMin   string                `toml:"interval_min,omitempty"`
+	IntervalMax   string                `toml:"interval_max,omitempty"`
+	AlertAfter    string                `toml:"alert_after,omitempty"`
+	CriticalAfter string                `toml:"critical_after,omitempty"`
+	Schedule      string                `toml:"schedule,omitempty"`
+	Check         string                `toml:"check,omitempty"`
+	On            string                `toml:"on,omitempty"`
+	Pool          string                `toml:"pool,omitempty"`
+	Timeout       string                `toml:"timeout,omitempty"`
+	Enabled       *bool                 `toml:"enabled,omitempty"`
+	Idempotent    bool                  `toml:"idempotent,omitempty"`
+	Env           map[string]string     `toml:"env,omitempty"`
+	Params        map[string]OrderParam `toml:"params,omitempty"`
+	SkipAliases   []string              `toml:"skip_aliases,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -125,22 +143,26 @@ func (d orderDecode) normalized() Order {
 		trigger = d.Gate
 	}
 	return Order{
-		Description: d.Description,
-		Formula:     d.Formula,
-		Exec:        d.Exec,
-		Scope:       d.Scope,
-		Trigger:     trigger,
-		Interval:    d.Interval,
-		Schedule:    d.Schedule,
-		Check:       d.Check,
-		On:          d.On,
-		Pool:        d.Pool,
-		Timeout:     d.Timeout,
-		Enabled:     d.Enabled,
-		Idempotent:  d.Idempotent,
-		Env:         d.Env,
-		Params:      d.Params,
-		skipAliases: d.SkipAliases,
+		Description:   d.Description,
+		Formula:       d.Formula,
+		Exec:          d.Exec,
+		Scope:         d.Scope,
+		Trigger:       trigger,
+		Interval:      d.Interval,
+		IntervalMin:   d.IntervalMin,
+		IntervalMax:   d.IntervalMax,
+		AlertAfter:    d.AlertAfter,
+		CriticalAfter: d.CriticalAfter,
+		Schedule:      d.Schedule,
+		Check:         d.Check,
+		On:            d.On,
+		Pool:          d.Pool,
+		Timeout:       d.Timeout,
+		Enabled:       d.Enabled,
+		Idempotent:    d.Idempotent,
+		Env:           d.Env,
+		Params:        d.Params,
+		skipAliases:   d.SkipAliases,
 	}
 }
 
@@ -232,6 +254,26 @@ func Validate(a Order) error {
 	if a.Timeout != "" {
 		if _, err := time.ParseDuration(a.Timeout); err != nil {
 			return fmt.Errorf("order %q: invalid timeout %q: %w", a.Name, a.Timeout, err)
+		}
+	}
+	if a.IntervalMin != "" {
+		if _, err := time.ParseDuration(a.IntervalMin); err != nil {
+			return fmt.Errorf("order %q: invalid interval_min %q: %w", a.Name, a.IntervalMin, err)
+		}
+	}
+	if a.IntervalMax != "" {
+		if _, err := time.ParseDuration(a.IntervalMax); err != nil {
+			return fmt.Errorf("order %q: invalid interval_max %q: %w", a.Name, a.IntervalMax, err)
+		}
+	}
+	if a.AlertAfter != "" {
+		if _, err := time.ParseDuration(a.AlertAfter); err != nil {
+			return fmt.Errorf("order %q: invalid alert_after %q: %w", a.Name, a.AlertAfter, err)
+		}
+	}
+	if a.CriticalAfter != "" {
+		if _, err := time.ParseDuration(a.CriticalAfter); err != nil {
+			return fmt.Errorf("order %q: invalid critical_after %q: %w", a.Name, a.CriticalAfter, err)
 		}
 	}
 	switch a.Trigger {

@@ -92,6 +92,52 @@ func CursorFuncForStore(store beads.Store) CursorFunc {
 	}
 }
 
+// IntervalHintFuncForStore returns a function that reads the next_interval_hint
+// metadata value from the most recent order-tracking bead for a given scoped
+// order name. An empty string is returned when no hint exists or the lookup
+// fails; errors are logged and silently swallowed so a hint failure never
+// blocks an order from firing.
+func IntervalHintFuncForStore(store beads.Store) IntervalHintFunc {
+	return func(name string) (string, error) {
+		if store == nil {
+			return "", nil
+		}
+		label := "order-run:" + name
+		results, err := store.List(beads.ListQuery{
+			Label:         label,
+			Limit:         1,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
+		})
+		if err != nil && len(results) == 0 {
+			return "", nil
+		}
+		if len(results) == 0 {
+			return "", nil
+		}
+		return results[0].Metadata["next_interval_hint"], nil
+	}
+}
+
+// IntervalHintAcrossStores returns the first non-empty next_interval_hint
+// found across a set of stores for a given order name.
+func IntervalHintAcrossStores(stores ...beads.Store) IntervalHintFunc {
+	return func(name string) (string, error) {
+		for _, store := range stores {
+			if store == nil {
+				continue
+			}
+			hint, err := IntervalHintFuncForStore(store)(name)
+			if err != nil || hint == "" {
+				continue
+			}
+			return hint, nil
+		}
+		return "", nil
+	}
+}
+
 // CursorAcrossStores merges seq cursors from multiple stores.
 func CursorAcrossStores(stores ...beads.Store) CursorFunc {
 	fns := make([]CursorFunc, 0, len(stores))

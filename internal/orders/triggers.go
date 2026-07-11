@@ -34,11 +34,23 @@ type LastRunFunc func(name string) (time.Time, error)
 // Returns 0 if no cursor exists.
 type CursorFunc func(orderName string) uint64
 
+// IntervalHintFunc returns the next_interval_hint written by the most recent
+// order run, or an empty string when no hint exists. The name argument is the
+// scoped order name (from Order.ScopedName). Errors are non-fatal: a failed
+// lookup falls back to the static TOML interval.
+type IntervalHintFunc func(name string) (string, error)
+
 // TriggerOptions carries execution context for triggers that run subprocesses.
 type TriggerOptions struct {
 	ConditionDir     string
 	ConditionEnv     []string
 	ConditionTimeout time.Duration
+	// HintFn, when non-nil, is called by cooldown triggers to read the
+	// next_interval_hint metadata written by the previous order run.
+	// A non-empty, parseable hint within [IntervalMin, IntervalMax] replaces
+	// the static Interval for this evaluation. Absent or unparseable hints
+	// fall back to the static Interval silently.
+	HintFn IntervalHintFunc
 }
 
 var (
@@ -62,7 +74,7 @@ func CheckTrigger(a Order, now time.Time, lastRunFn LastRunFunc, ep events.Provi
 func CheckTriggerWithOptions(a Order, now time.Time, lastRunFn LastRunFunc, ep events.Provider, cursorFn CursorFunc, opts TriggerOptions) TriggerResult {
 	switch a.Trigger {
 	case "cooldown":
-		return checkCooldown(a, now, lastRunFn)
+		return checkCooldown(a, now, lastRunFn, opts)
 	case "cron":
 		return checkCron(a, now, lastRunFn)
 	case "condition":
@@ -81,10 +93,23 @@ func CheckTriggerWithOptions(a Order, now time.Time, lastRunFn LastRunFunc, ep e
 }
 
 // checkCooldown checks if enough time has elapsed since the last run.
-func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
+// When opts.HintFn is provided and the order has interval_min/max bounds,
+// the hint is clamped to [interval_min, interval_max] and used as the
+// effective interval. Falls back to the static Interval when no valid hint
+// is available.
+func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc, opts TriggerOptions) TriggerResult {
 	interval, err := time.ParseDuration(a.Interval)
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad interval: %v", err)}
+	}
+
+	effective := interval
+	if opts.HintFn != nil {
+		if hint, hintErr := opts.HintFn(a.ScopedName()); hintErr == nil && hint != "" {
+			if hintDur, parseErr := time.ParseDuration(hint); parseErr == nil && hintDur > 0 {
+				effective = clampInterval(hintDur, a.IntervalMin, a.IntervalMax, interval)
+			}
+		}
 	}
 
 	last, err := lastRunFn(a.ScopedName())
@@ -97,20 +122,41 @@ func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult 
 	}
 
 	elapsed := now.Sub(last)
-	if elapsed >= interval {
+	if elapsed >= effective {
 		return TriggerResult{
 			Due:     true,
-			Reason:  fmt.Sprintf("elapsed %s >= interval %s", elapsed.Round(time.Second), interval),
+			Reason:  fmt.Sprintf("elapsed %s >= interval %s", elapsed.Round(time.Second), effective),
 			LastRun: last,
 		}
 	}
 
-	remaining := interval - elapsed
+	remaining := effective - elapsed
 	return TriggerResult{
 		Due:     false,
 		Reason:  fmt.Sprintf("cooldown: %s remaining", remaining.Round(time.Second)),
 		LastRun: last,
 	}
+}
+
+// clampInterval applies interval_min and interval_max bounds to hint.
+// A non-positive hint returns the static fallback immediately.
+// When a bound is empty or unparseable it is treated as unbounded on that side.
+func clampInterval(hint time.Duration, minStr, maxStr string, fallback time.Duration) time.Duration {
+	if hint <= 0 {
+		return fallback
+	}
+	result := hint
+	if minStr != "" {
+		if minDur, err := time.ParseDuration(minStr); err == nil && result < minDur {
+			result = minDur
+		}
+	}
+	if maxStr != "" {
+		if maxDur, err := time.ParseDuration(maxStr); err == nil && result > maxDur {
+			result = maxDur
+		}
+	}
+	return result
 }
 
 // checkCron uses minute-granularity matching against the schedule, WITH

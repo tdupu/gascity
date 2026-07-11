@@ -566,12 +566,27 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 
 func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
 	name := orderDisplayName(order)
+
+	// Use explicit thresholds when present; fall back to the 1.5×/3× rule.
+	warnThreshold := expected + expected/2
+	critThreshold := expected * 3
+	if order.AlertAfter != "" {
+		if d, err := time.ParseDuration(order.AlertAfter); err == nil && d > 0 {
+			warnThreshold = d
+		}
+	}
+	if order.CriticalAfter != "" {
+		if d, err := time.ParseDuration(order.CriticalAfter); err == nil && d > 0 {
+			critThreshold = d
+		}
+	}
+
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
 			return StatusOK, SeverityBlocking, fmt.Sprintf("%s: never fired (controller start unknown)", name)
 		}
 		uptime := nonNegativeDuration(now.Sub(controllerStarted))
-		if uptime >= expected+expected/2 {
+		if uptime >= warnThreshold {
 			// Advisory only for cron: a cron order that has never fired since
 			// controller start may be the cron-scheduler bug (ga-97qngx), not
 			// a real outage. Cooldown never-fired/stale paths remain blocking
@@ -586,9 +601,9 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 
 	age := nonNegativeDuration(now.Sub(lastFired))
 	switch {
-	case age >= expected*3:
+	case age >= critThreshold:
 		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
-	case age >= expected+expected/2:
+	case age >= warnThreshold:
 		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
 		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
