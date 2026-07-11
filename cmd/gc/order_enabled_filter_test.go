@@ -187,6 +187,7 @@ func writeOrderEnabledFilterFixture(t *testing.T, cityDir, name string) {
 exec = "scripts/` + name + `.sh"
 trigger = "cooldown"
 interval = "1m"
+delete_after_close = "1h"
 `
 	if err := os.WriteFile(filepath.Join(ordersDir, name+".toml"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write order %q: %v", name, err)
