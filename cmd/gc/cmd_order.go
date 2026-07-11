@@ -1087,7 +1087,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
 		}
 		for _, a := range aa {
-			if err := validateOrderCheckPreflight(a); err != nil {
+			if err := validateOrderCheckPreflight(a, cfg); err != nil {
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -1166,7 +1166,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 	}
 	anyDue := false
 	for _, a := range aa {
-		if err := validateOrderCheckPreflight(a); err != nil {
+		if err := validateOrderCheckPreflight(a, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -1237,8 +1237,8 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 	return 1
 }
 
-func validateOrderCheckPreflight(a orders.Order) error {
-	return validateOrderExecEnvOverrides(a)
+func validateOrderCheckPreflight(a orders.Order, cfg *config.City) error {
+	return orderValidators(cfg)(a)
 }
 
 // --- gc order history ---

@@ -127,6 +127,7 @@ schedule = "0 * * * *"
 exec = "true"
 trigger = "cooldown"
 interval = "1m"
+delete_after_close = "1h"
 `)
 	added, err := scanOrderSetSnapshotFS(fs, "/city", cfg, io.Discard, "test")
 	if err != nil {
@@ -6135,6 +6136,7 @@ func TestBuildOrderDispatcherWithRigs(t *testing.T) {
 formula = "mol-rig-health"
 trigger = "cooldown"
 interval = "5m"
+delete_after_close = "1h"
 pool = "polecat"
 `)
 
@@ -6414,6 +6416,7 @@ func TestBuildOrderDispatcherUsesProviderAwareFileStore(t *testing.T) {
 formula = "test-formula"
 trigger = "cooldown"
 interval = "1m"
+delete_after_close = "1h"
 pool = "worker"
 `)
 	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
@@ -6465,6 +6468,7 @@ func TestBuildOrderDispatcherRigOrderUsesRigFileStore(t *testing.T) {
 formula = "test-formula"
 trigger = "cooldown"
 interval = "1m"
+delete_after_close = "1h"
 pool = "worker"
 `)
 	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
@@ -6543,6 +6547,7 @@ func TestBuildOrderDispatcherRigOrderCityPoolUsesCityFileStore(t *testing.T) {
 formula = "test-formula"
 trigger = "cooldown"
 interval = "1m"
+delete_after_close = "1h"
 pool = "dog"
 `)
 	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
@@ -6930,6 +6935,7 @@ func TestBuildOrderDispatcherReopensStoreForScopedFileReads(t *testing.T) {
 formula = "test-formula"
 trigger = "cooldown"
 interval = "1m"
+delete_after_close = "1h"
 pool = "worker"
 `)
 	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
@@ -6996,6 +7002,7 @@ func TestBuildOrderDispatcherCityPackLayers(t *testing.T) {
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
+delete_after_close = "1h"
 `)
 
 	// Pack dir: wasteland-poll order.
@@ -7007,6 +7014,7 @@ interval = "30s"
 exec = "scripts/wasteland-poll.sh"
 trigger = "cooldown"
 interval = "2m"
+delete_after_close = "1h"
 `)
 
 	cfg := &config.City{
@@ -7058,6 +7066,7 @@ func TestBuildOrderDispatcherCityPackWithOverride(t *testing.T) {
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
+delete_after_close = "1h"
 `)
 
 	topoOrderDir := filepath.Join(topoDir, "orders")
@@ -7068,6 +7077,7 @@ interval = "30s"
 exec = "scripts/wasteland-poll.sh"
 trigger = "cooldown"
 interval = "2m"
+delete_after_close = "1h"
 `)
 
 	tenSec := "10s"
@@ -7130,6 +7140,7 @@ func TestBuildOrderDispatcherOverrideDisablesDropsFromDispatcher(t *testing.T) {
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
+delete_after_close = "1h"
 `)
 
 	topoFormulaDir := topoDir + "/formulas"
@@ -7144,6 +7155,7 @@ interval = "30s"
 exec = "scripts/wasteland-poll.sh"
 trigger = "cooldown"
 interval = "2m"
+delete_after_close = "1h"
 `)
 
 	disabled := false
@@ -7198,6 +7210,7 @@ func TestBuildOrderDispatcherOverrideNotFoundNonFatal(t *testing.T) {
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
+delete_after_close = "1h"
 `)
 
 	tenSec := "10s"
