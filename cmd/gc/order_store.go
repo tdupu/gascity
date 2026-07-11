@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -216,6 +217,24 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 
 func validateOrderExecEnvOverrides(a orders.Order) error {
 	return orders.ValidateExecEnvOverrides(a)
+}
+
+// orderValidators returns a chained OrderValidator that runs exec-env
+// override validation followed by retention-policy validation. The city
+// config is captured in a closure so callers pass it once at scan time.
+func orderValidators(cfg *config.City) orderdiscovery.OrderValidator {
+	cityDAC := ""
+	if cfg != nil {
+		if p, ok := cfg.Beads.Policies["order_tracking"]; ok {
+			cityDAC = p.DeleteAfterClose
+		}
+	}
+	return func(a orders.Order) error {
+		if err := orders.ValidateExecEnvOverrides(a); err != nil {
+			return err
+		}
+		return orders.ValidateRetentionPolicy(a, cityDAC)
+	}
 }
 
 func isReservedOrderExecEnvKey(key string) bool {

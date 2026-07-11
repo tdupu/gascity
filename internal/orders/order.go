@@ -86,6 +86,13 @@ type Order struct {
 	// marked required must be present in the dispatch vars or the order refuses
 	// to fire. Use the `[order.params]` TOML table, e.g. `repo = { required = true }`.
 	Params map[string]OrderParam `toml:"params,omitempty"`
+	// DeleteAfterClose is the per-order retention TTL for closed order-tracking
+	// beads produced by this order. Accepts Go duration syntax plus whole-day
+	// units (e.g. "48h" or "7d"). Overrides the city-level
+	// [beads.policies.order_tracking].delete_after_close for this order's
+	// tracking beads. Required when the order's cooldown interval is under 15m
+	// and the city has no explicit order_tracking retention override.
+	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
 	// Source is the absolute file path to the discovered order file (set by scanner, not from TOML).
 	Source string `toml:"-"`
 	// FormulaLayer is the formula layer directory this order was
@@ -114,27 +121,28 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description   string                `toml:"description,omitempty"`
-	Formula       string                `toml:"formula,omitempty"`
-	Exec          string                `toml:"exec,omitempty"`
-	Scope         string                `toml:"scope,omitempty"`
-	Trigger       string                `toml:"trigger,omitempty"`
-	Gate          string                `toml:"gate,omitempty"`
-	Interval      string                `toml:"interval,omitempty"`
-	IntervalMin   string                `toml:"interval_min,omitempty"`
-	IntervalMax   string                `toml:"interval_max,omitempty"`
-	AlertAfter    string                `toml:"alert_after,omitempty"`
-	CriticalAfter string                `toml:"critical_after,omitempty"`
-	Schedule      string                `toml:"schedule,omitempty"`
-	Check         string                `toml:"check,omitempty"`
-	On            string                `toml:"on,omitempty"`
-	Pool          string                `toml:"pool,omitempty"`
-	Timeout       string                `toml:"timeout,omitempty"`
-	Enabled       *bool                 `toml:"enabled,omitempty"`
-	Idempotent    bool                  `toml:"idempotent,omitempty"`
-	Env           map[string]string     `toml:"env,omitempty"`
-	Params        map[string]OrderParam `toml:"params,omitempty"`
-	SkipAliases   []string              `toml:"skip_aliases,omitempty"`
+	Description      string                `toml:"description,omitempty"`
+	Formula          string                `toml:"formula,omitempty"`
+	Exec             string                `toml:"exec,omitempty"`
+	Scope            string                `toml:"scope,omitempty"`
+	Trigger          string                `toml:"trigger,omitempty"`
+	Gate             string                `toml:"gate,omitempty"`
+	Interval         string                `toml:"interval,omitempty"`
+	IntervalMin      string                `toml:"interval_min,omitempty"`
+	IntervalMax      string                `toml:"interval_max,omitempty"`
+	AlertAfter       string                `toml:"alert_after,omitempty"`
+	CriticalAfter    string                `toml:"critical_after,omitempty"`
+	Schedule         string                `toml:"schedule,omitempty"`
+	Check            string                `toml:"check,omitempty"`
+	On               string                `toml:"on,omitempty"`
+	Pool             string                `toml:"pool,omitempty"`
+	Timeout          string                `toml:"timeout,omitempty"`
+	Enabled          *bool                 `toml:"enabled,omitempty"`
+	Idempotent       bool                  `toml:"idempotent,omitempty"`
+	Env              map[string]string     `toml:"env,omitempty"`
+	Params           map[string]OrderParam `toml:"params,omitempty"`
+	SkipAliases      []string              `toml:"skip_aliases,omitempty"`
+	DeleteAfterClose string                `toml:"delete_after_close,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -143,26 +151,27 @@ func (d orderDecode) normalized() Order {
 		trigger = d.Gate
 	}
 	return Order{
-		Description:   d.Description,
-		Formula:       d.Formula,
-		Exec:          d.Exec,
-		Scope:         d.Scope,
-		Trigger:       trigger,
-		Interval:      d.Interval,
-		IntervalMin:   d.IntervalMin,
-		IntervalMax:   d.IntervalMax,
-		AlertAfter:    d.AlertAfter,
-		CriticalAfter: d.CriticalAfter,
-		Schedule:      d.Schedule,
-		Check:         d.Check,
-		On:            d.On,
-		Pool:          d.Pool,
-		Timeout:       d.Timeout,
-		Enabled:       d.Enabled,
-		Idempotent:    d.Idempotent,
-		Env:           d.Env,
-		Params:        d.Params,
-		skipAliases:   d.SkipAliases,
+		Description:      d.Description,
+		Formula:          d.Formula,
+		Exec:             d.Exec,
+		Scope:            d.Scope,
+		Trigger:          trigger,
+		Interval:         d.Interval,
+		IntervalMin:      d.IntervalMin,
+		IntervalMax:      d.IntervalMax,
+		AlertAfter:       d.AlertAfter,
+		CriticalAfter:    d.CriticalAfter,
+		Schedule:         d.Schedule,
+		Check:            d.Check,
+		On:               d.On,
+		Pool:             d.Pool,
+		Timeout:          d.Timeout,
+		Enabled:          d.Enabled,
+		Idempotent:       d.Idempotent,
+		Env:              d.Env,
+		Params:           d.Params,
+		skipAliases:      d.SkipAliases,
+		DeleteAfterClose: d.DeleteAfterClose,
 	}
 }
 

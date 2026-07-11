@@ -1277,7 +1277,7 @@ func (cs *controllerState) OrdersAll() []orders.Order {
 			log.Printf("gc api: skipping invalid order %s for %s: %v", orderName, cs.cityPath, err)
 			return nil
 		},
-		ValidateOrder: validateOrderExecEnvOverrides,
+		ValidateOrder: orderValidators(cfg),
 	})
 	if err != nil {
 		return nil
