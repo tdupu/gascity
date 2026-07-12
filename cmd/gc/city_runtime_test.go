@@ -841,6 +841,57 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeDemandSnapshotSkipsRebuildWhenNoNewEvents(t *testing.T) {
+	fakeEP := events.NewFake()
+	buildCalls := 0
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			eventProv: fakeEP,
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return DesiredStateResult{
+			State: map[string]TemplateParams{"worker-1": {SessionName: "worker-1"}},
+		}
+	}
+
+	sessionBeads := newSessionBeadSnapshot(nil)
+
+	// First patrol builds (no prior snapshot).
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if buildCalls != 1 {
+		t.Fatalf("build count after first patrol = %d, want 1", buildCalls)
+	}
+
+	// Second patrol with no new events: event seq unchanged, skip rebuild.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if buildCalls != 1 {
+		t.Fatalf("build count after second patrol (no new events) = %d, want 1 (cache hit)", buildCalls)
+	}
+
+	// A new event arrives.
+	fakeEP.Record(events.Event{Type: "bead.updated"})
+
+	// Next patrol detects higher event seq and rebuilds.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if buildCalls != 2 {
+		t.Fatalf("build count after event arrival = %d, want 2 (cache miss)", buildCalls)
+	}
+
+	// No further events: next patrol reuses the snapshot.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	if buildCalls != 2 {
+		t.Fatalf("build count after second no-event patrol = %d, want 2 (cache hit)", buildCalls)
+	}
+}
+
 func TestCityRuntimeEnsureManagedDoltPublishedForTickCallsHealthWhenManagedPortMissing(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
