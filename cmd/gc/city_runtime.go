@@ -134,6 +134,7 @@ type CityRuntime struct {
 }
 
 const runtimeDemandSnapshotMaxAge = 30 * time.Second
+const runtimeDemandSnapshotNoEventsMaxAge = 5 * time.Minute
 
 // scaleCheckDemandMinInterval floors how often a patrol tick re-runs an agent
 // scale_check probe. scale_check demand cannot ride the event-backed
@@ -3244,28 +3245,16 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 }
 
 // demandSnapshotPatrolMaxAge reports how long a cached demand snapshot may be
-// reused across consecutive patrol ticks, or 0 when patrol must rebuild every
-// tick. Non-patrol triggers bypass this entirely (see shouldRefreshDemandSnapshot).
+// reused across consecutive patrol ticks. Non-patrol triggers bypass this
+// entirely (see shouldRefreshDemandSnapshot).
 func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	if cr.demandSnapshotsEnabled() {
 		return runtimeDemandSnapshotMaxAge
 	}
-	// Snapshots are not event-backed. Without an event provider the cache
-	// cannot be invalidated by routed-work events, so patrol must rebuild every
-	// tick to stay responsive.
-	if cr.cs == nil || cr.cs.EventProvider() == nil {
-		return 0
-	}
-	// An event provider exists but a configured scale_check makes demand
-	// non-event-backed, so it cannot ride the 30s cache. The control-dispatcher
-	// does not poke the controller for scale_check-routed pool work (only sling
-	// does), so that work is discovered by the next patrol scale_check rather
-	// than by an immediate poke. Flooring the patrol re-eval cadence therefore
-	// bounds discovery latency to scaleCheckDemandMinInterval and is a no-op
-	// whenever patrol_interval >= that floor (e.g. the 30s default); it only
-	// bites sub-second patrol_intervals, where it stops the probe subprocess
-	// from running on every tick.
-	return scaleCheckDemandMinInterval
+	// No event-backed invalidation path available. Cache by session
+	// fingerprint with a conservative safety TTL so patrol ticks can
+	// reuse a stable snapshot instead of rebuilding every tick.
+	return runtimeDemandSnapshotNoEventsMaxAge
 }
 
 func (cr *CityRuntime) demandSnapshotsEnabled() bool {

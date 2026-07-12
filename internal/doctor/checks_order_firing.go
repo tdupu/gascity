@@ -91,7 +91,16 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	firedEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderFired})
+	maxSeq, _ := events.ReadLatestSeq(eventPath)
+	const orderFiredLookback = uint64(500_000)
+	var orderFiredAfterSeq uint64
+	if maxSeq > orderFiredLookback {
+		orderFiredAfterSeq = maxSeq - orderFiredLookback
+	}
+	firedEvents, err := events.ReadFiltered(eventPath, events.Filter{
+		Type:     events.OrderFired,
+		AfterSeq: orderFiredAfterSeq,
+	})
 	if err != nil {
 		result.Status = StatusError
 		result.Message = fmt.Sprintf("read order firing events: %v", err)
@@ -520,7 +529,31 @@ func cronRangeForDoctor(rangePart string, lowerBound, upperBound int) (int, int,
 }
 
 func latestControllerStartedAt(eventPath string) (time.Time, error) {
-	startEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.ControllerStarted})
+	// Fast path: controller start in active file tail (the common case).
+	tailEvents, err := events.ReadFilteredTail(eventPath, events.Filter{Type: events.ControllerStarted}, 5)
+	if err == nil {
+		var latest time.Time
+		for _, e := range tailEvents {
+			if e.Ts.After(latest) {
+				latest = e.Ts
+			}
+		}
+		if !latest.IsZero() {
+			return latest, nil
+		}
+	}
+	// Slow path: start event is in archived history. Use AfterSeq to skip
+	// the bulk of archives and read only the recent ones.
+	maxSeq, seqErr := events.ReadLatestSeq(eventPath)
+	const controllerStartLookback = uint64(100_000)
+	var afterSeq uint64
+	if seqErr == nil && maxSeq > controllerStartLookback {
+		afterSeq = maxSeq - controllerStartLookback
+	}
+	startEvents, err := events.ReadFiltered(eventPath, events.Filter{
+		Type:     events.ControllerStarted,
+		AfterSeq: afterSeq,
+	})
 	if err != nil {
 		return time.Time{}, err
 	}
