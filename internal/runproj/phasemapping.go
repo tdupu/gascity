@@ -34,13 +34,8 @@ type phaseMapping struct {
 
 // mapRunPhase classifies a run group into a phase. Port of TS mapRunPhase.
 func mapRunPhase(issues []runIssue) phaseMapping {
-	// Status-based branches first — authoritative.
-	for _, i := range issues {
-		if i.status == "blocked" || strings.Contains(textForIssue(i), "blocked") {
-			return phaseMapping{phase: "blocked", label: "blocked"}
-		}
-	}
-
+	// All-closed check runs first: a run where every bead is closed is
+	// complete regardless of any "blocked" vocabulary in bead descriptions.
 	if len(issues) > 0 {
 		allClosed := true
 		for _, i := range issues {
@@ -51,6 +46,14 @@ func mapRunPhase(issues []runIssue) phaseMapping {
 		}
 		if allClosed {
 			return phaseMapping{phase: "complete", label: "complete"}
+		}
+	}
+
+	// Blocked check uses status only — substring-scanning descriptions fires
+	// false positives on mol-do-work step text that mentions "blocked".
+	for _, i := range issues {
+		if i.status == "blocked" {
+			return phaseMapping{phase: "blocked", label: "blocked"}
 		}
 	}
 

@@ -134,6 +134,47 @@ func TestBuildRunDetailUnsupportedRunReasons(t *testing.T) {
 	assertUnsupported(t, []beads.Bead{invalidSnapshot}, "run-x", ReasonInvalidSnapshot)
 }
 
+// TestMapRunPhaseAllClosedWinsOverBlockedDescriptionText pins the gs-58b fix:
+// a run where every bead is closed must classify as "complete" even when bead
+// descriptions contain the word "blocked" (mol-do-work template vocabulary).
+// Before the fix the blocked text-scan fired first and returned "blocked".
+func TestMapRunPhaseAllClosedWinsOverBlockedDescriptionText(t *testing.T) {
+	issues := []runIssue{
+		{status: "closed", desc: "If a bead is blocked, escalate to the operator."},
+		{status: "closed", desc: "Work step: check for blocked dependencies."},
+	}
+	got := mapRunPhase(issues)
+	if got.phase != "complete" {
+		t.Errorf("phase = %q, want complete (all closed; blocked in desc is template text, not status)", got.phase)
+	}
+}
+
+// TestMapRunPhaseBlockedRequiresStatus pins that description-text containing
+// "blocked" does NOT classify a run as blocked when no bead has status=="blocked".
+func TestMapRunPhaseBlockedRequiresStatus(t *testing.T) {
+	issues := []runIssue{
+		{status: "open", desc: "If a bead is blocked, escalate."},
+		{status: "in_progress", title: "mol-do-work step: handle blocked cases"},
+	}
+	got := mapRunPhase(issues)
+	if got.phase == "blocked" {
+		t.Errorf("phase = blocked but no bead has status==blocked; description text must not trigger blocked phase")
+	}
+}
+
+// TestMapRunPhaseStatusBlockedClassifiesAsBlocked confirms a bead with
+// status=="blocked" still correctly classifies the run as blocked.
+func TestMapRunPhaseStatusBlockedClassifiesAsBlocked(t *testing.T) {
+	issues := []runIssue{
+		{status: "closed"},
+		{status: "blocked"},
+	}
+	got := mapRunPhase(issues)
+	if got.phase != "blocked" {
+		t.Errorf("phase = %q, want blocked (one bead has status==blocked)", got.phase)
+	}
+}
+
 func stepIssue(stepID, status string) runIssue {
 	return runIssue{
 		status: status,
