@@ -970,6 +970,13 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
 	if allowRecovery {
+		// Fast path: before spawning gc-beads-bd.sh health (which incurs the
+		// providerRecoverCooldown penalty on stale dolt-state.json), probe the
+		// ambient GC_DOLT_PORT directly with a 250ms dial. Eliminates the
+		// 8-12s extra overhead in degraded state when the server is reachable.
+		if envPort := strings.TrimSpace(os.Getenv("GC_DOLT_PORT")); doltPortReachable(envPort) {
+			return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: envPort}, true, nil
+		}
 		if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
 			resetRecoveryCache()
 			if port := recoveredManagedDoltPort(); port != "" {

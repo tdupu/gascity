@@ -1566,7 +1566,7 @@ func TestCloseConvoyWithReasonBdStoreForwardsReasonWithoutShow(t *testing.T) {
 			return nil, fmt.Errorf("unexpected bd show before convoy close")
 		}
 		switch strings.Join(args, " ") {
-		case "update --json " + id + " --set-metadata close_reason=" + convoyAutocloseReason:
+		case "update --json " + id + " --set-metadata close_reason=" + `"` + convoyAutocloseReason + `"`:
 			return []byte(`[{"id":"bd-x","title":"batch","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
 		case "close --force --json --reason " + convoyAutocloseReason + " " + id:
 			closeArgs = append([]string(nil), args...)

@@ -231,7 +231,7 @@ esac
 	log := string(logData)
 	for _, want := range []string{
 		"init --server -p tc --skip-hooks --database tc",
-		"update --json tc-1 --set-metadata gc.routed_to=sample/session-a",
+		`update --json tc-1 --set-metadata gc.routed_to="sample/session-a"`,
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd log missing %q:\n%s", want, log)

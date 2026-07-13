@@ -47,6 +47,33 @@ func ensureBuiltinPacksForConfigLoad(fs fsys.FS, tomlPath string, warningWriter 
 	return EnsureBuiltinRuntimeAssets(filepath.Dir(tomlPath), warningWriter)
 }
 
+// builtinRuntimeReadySentinelPath returns the path of the sentinel file used
+// to persist EnsureBuiltinRuntimeAssets readiness across process restarts.
+func builtinRuntimeReadySentinelPath(cityPath string) string {
+	return filepath.Join(cityPath, citylayout.RuntimeRoot, "builtin-runtime-ready")
+}
+
+// readBuiltinRuntimeReadySentinel returns the content of the sentinel file,
+// or "" when the file is absent or unreadable.
+func readBuiltinRuntimeReadySentinel(cityPath string) string {
+	data, err := os.ReadFile(builtinRuntimeReadySentinelPath(cityPath))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// writeBuiltinRuntimeReadySentinel persists the current bundled pack commit
+// as a sentinel so subsequent gc invocations can skip the expensive cache
+// validation work (saves ~100ms per invocation on warm caches). Best-effort.
+func writeBuiltinRuntimeReadySentinel(cityPath string) {
+	path := builtinRuntimeReadySentinelPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, []byte(bundledPackImportCommit()+"\n"), 0o644)
+}
+
 // EnsureBuiltinRuntimeAssets performs the per-city builtin readiness work
 // outside config loading (init finalization, supervisor startup and city
 // registration, beads bootstrap). Failures degrade to a once-per-city
@@ -65,6 +92,16 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 		return nil
 	}
 	if state.ready && requiredBuiltinSourcesUsable(cityPath) && lockedBundledImportsUsable(cityPath) {
+		return nil
+	}
+	// Cross-process fast path: a prior successful run wrote a sentinel file
+	// recording the current binary's bundled commit. If the sentinel matches
+	// and the caches are still valid, skip the expensive mutation work.
+	if !state.ready &&
+		readBuiltinRuntimeReadySentinel(cityPath) == bundledPackImportCommit() &&
+		requiredBuiltinSourcesUsable(cityPath) &&
+		lockedBundledImportsUsable(cityPath) {
+		state.ready = true
 		return nil
 	}
 	state.ready = false
@@ -95,6 +132,7 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 	}
 	state.ready = true
 	state.lastWarning = ""
+	writeBuiltinRuntimeReadySentinel(cityPath)
 	return nil
 }
 

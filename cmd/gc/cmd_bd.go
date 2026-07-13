@@ -212,10 +212,18 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// resolve to their bound path. A raw config.Load here would make
 	// every already-migrated rig look unbound and fail the new guard
 	// in resolveBdScopeTarget / bdRigScopeTarget.
-	cfg, err := loadCityConfig(cityPath, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	//
+	// Reuse the config already loaded by registerPackCommands when available;
+	// the two loads are identical (same cityPath, same OSFS) so sharing saves
+	// ~300ms of pack expansion per gc bd invocation.
+	cfg, ok := cachedCityConfig(cityPath)
+	if !ok {
+		var err error
+		cfg, err = loadCityConfig(cityPath, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "")

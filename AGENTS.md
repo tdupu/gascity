@@ -425,7 +425,7 @@ Before considering any task complete:
   machines where sharding is useful)
 - Broader process/integration coverage uses the sharded targets documented in
   `TESTING.md` instead of one monolithic `go test ./...` sweep
-- `go vet ./...` clean
+- `make vet` clean (`CGO_ENABLED=0 go vet ./...` — avoids third-party ICU cgo failure on hosts without ICU headers; gascity repo has no cgo of its own)
 - `.githooks/pre-commit` is active locally (`git config core.hooksPath`
   prints `.githooks`) and has run for the staged change
 - `make dashboard-check` passes for any change touching `internal/api/`,

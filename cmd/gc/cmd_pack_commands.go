@@ -7,11 +7,27 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
+
+// packCommandsCityConfigCache stores city configs loaded by registerPackCommands
+// so that doBd (and other same-invocation callers) can reuse the loaded config
+// without a second full parse + pack expansion (~300ms saving per gc bd call).
+var packCommandsCityConfigCache sync.Map // normalizedCityPath → *config.City
+
+// cachedCityConfig returns the *config.City cached by registerPackCommands for
+// the given cityPath, or nil/false when no cache entry exists.
+func cachedCityConfig(cityPath string) (*config.City, bool) {
+	v, ok := packCommandsCityConfigCache.Load(normalizePathForCompare(cityPath))
+	if !ok {
+		return nil, false
+	}
+	return v.(*config.City), true
+}
 
 func addPackCommandsToRoot(root *cobra.Command, entries []config.PackCommandInfo, cityPath, cityName string, stdout, stderr io.Writer) {
 	discovered := make([]config.DiscoveredCommand, 0, len(entries))
@@ -51,6 +67,17 @@ func quietLoadCityConfig(cityPath string) (*config.City, error) {
 	return loadCityConfig(cityPath, io.Discard)
 }
 
+// firstNonFlagArg returns the first argument in args that is not a flag
+// (does not begin with "-"). Returns "" when no such argument is found.
+func firstNonFlagArg(args []string) string {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			return arg
+		}
+	}
+	return ""
+}
+
 // registerPackCommands attempts to discover the city, load config, and
 // register pack-provided CLI commands as top-level subcommands. Fails
 // silently if not in a city or config fails to load — core commands
@@ -64,6 +91,13 @@ func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
 	if isCredentialHelperInvocation(os.Args) {
 		return
 	}
+	// Skip pack discovery when the user is invoking a built-in command.
+	// Pack commands are top-level additions only; they cannot shadow or extend
+	// built-in subcommands. Avoids ~300-500ms of city discovery + config load
+	// for standard gc bd, gc status, gc hook, etc. invocations.
+	if name := firstNonFlagArg(os.Args[1:]); name != "" && coreCommandNames(root)[name] {
+		return
+	}
 	cityPath, err := resolveCity()
 	if err != nil {
 		return
@@ -72,6 +106,7 @@ func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
+	packCommandsCityConfigCache.Store(normalizePathForCompare(cityPath), cfg)
 
 	if len(cfg.PackCommands) == 0 {
 		return

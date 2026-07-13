@@ -139,11 +139,18 @@ func TestCreatePoolSessionBeadWithAlias_UpdatesExplicitIDBeadToResolvedAlias(t *
 			if updatedMetadata == "" {
 				return nil, fmt.Errorf("bd update missing --set-metadata: %v", args)
 			}
-			key, value, ok := strings.Cut(updatedMetadata, "=")
+			key, rawValue, ok := strings.Cut(updatedMetadata, "=")
 			if !ok || key != "session_name" {
 				return nil, fmt.Errorf("bd update metadata = %q, want session_name=<alias>", updatedMetadata)
 			}
-			created.Metadata[key] = value
+			// Simulate bd's JSON decoding: values are JSON-encoded by bdstore
+			// (e.g. "crew--gastown" is sent as `"crew--gastown"` with surrounding
+			// quotes). Real bd strips the JSON string delimiters on write.
+			var decoded string
+			if err := json.Unmarshal([]byte(rawValue), &decoded); err == nil {
+				rawValue = decoded
+			}
+			created.Metadata[key] = rawValue
 			return []byte(`{"id":"` + created.ID + `"}`), nil
 		default:
 			return nil, fmt.Errorf("unexpected bd args: %v", args)
@@ -160,8 +167,8 @@ func TestCreatePoolSessionBeadWithAlias_UpdatesExplicitIDBeadToResolvedAlias(t *
 	if !strings.HasPrefix(bead.ID, "mc-session-") {
 		t.Fatalf("bead.ID = %q, want explicit mc-session-* ID", bead.ID)
 	}
-	if updatedMetadata != "session_name=crew--gastown" {
-		t.Fatalf("updated metadata = %q, want session_name=crew--gastown", updatedMetadata)
+	if updatedMetadata != `session_name="crew--gastown"` {
+		t.Fatalf("updated metadata = %q, want %s", updatedMetadata, `session_name="crew--gastown"`)
 	}
 	if got := bead.SessionNameMetadata; got != "crew--gastown" {
 		t.Fatalf("session_name = %q, want resolved alias", got)

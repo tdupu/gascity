@@ -241,9 +241,9 @@ fmt-check: $(GOLANGCI_LINT)
 fmt: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) fmt ./...
 
-## vet: run go vet
+## vet: run go vet (CGO_ENABLED=0 avoids third-party ICU cgo dep failing on hosts without ICU headers)
 vet:
-	go vet ./...
+	CGO_ENABLED=0 go vet ./...
 
 ## TEST_ENV: env -i wrapper for `go test` invocations. Strips host env so
 ## agent-session vars (GC_CITY, GC_HOME, GC_SESSION_ID, ...) cannot leak into

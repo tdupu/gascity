@@ -1077,8 +1077,8 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')`,
 		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
 		`CURRENT_WISP=${GC_BEAD_ID:-}`,
-		`if [ -n "$CURRENT_WISP" ]; then`,
-		`gc bd mol burn "$CURRENT_WISP" --force`,
+		`gc bd query --json 'ephemeral=true AND (status=open OR status=in_progress)'`,
+		`gc bd mol burn "$w" --force || true`,
 		`pr_lookup_missing()`,
 		`pr_lookup_repo_mismatch()`,
 		`resolve_github_token()`,
@@ -1784,6 +1784,137 @@ func TestWorktreeSetupSyncSkipsMissingOrigin(t *testing.T) {
 	}
 }
 
+// TestWorktreeSetupRefusesWhenGitContextResolvesOutsideRig is the regression
+// test for gs-v4m: when the rig root is not its own git repo (missing .git
+// pointer), git walks up to an enclosing parent and the worktree is registered
+// in the wrong repo. The pre-flight guard must detect this and exit non-zero.
+//
+// This test uses the lifecycle example's worktree-setup.sh (same guard logic)
+// rather than the embedded gastown pack script, so it works without requiring
+// a gascity-packs module bump.
+func TestWorktreeSetupRefusesWhenGitContextResolvesOutsideRig(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// Locate worktree-setup.sh from the lifecycle example (sibling of this
+	// example directory), which carries the pre-flight gitdir guard.
+	script := filepath.Join(exampleDir(), "..", "lifecycle", "packs", "lifecycle", "assets", "scripts", "worktree-setup.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Skipf("lifecycle worktree-setup.sh not found (%v); skipping", err)
+	}
+
+	tmp := t.TempDir()
+	// parent is a git repo (simulates the city repo ~/gt).
+	parent := filepath.Join(tmp, "parent")
+	runCmd(t, tmp, "git", "init", parent)
+	runCmd(t, parent, "git", "config", "user.email", "test@example.com")
+	runCmd(t, parent, "git", "config", "user.name", "Gastown Test")
+	if err := os.WriteFile(filepath.Join(parent, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("writing README: %v", err)
+	}
+	runCmd(t, parent, "git", "add", ".")
+	runCmd(t, parent, "git", "commit", "-m", "init")
+
+	// rigRoot is a plain directory inside parent — no .git of its own.
+	// This simulates a rig directory without the .git pointer file that
+	// links it to its own repo. git -C rigRoot would walk up to parent.
+	rigRoot := filepath.Join(parent, "my-rig")
+	if err := os.Mkdir(rigRoot, 0o755); err != nil {
+		t.Fatalf("creating rig dir: %v", err)
+	}
+
+	wt := filepath.Join(tmp, "worktrees", "my-rig", "polecat")
+	cmd := exec.Command("sh", script, rigRoot, wt, "polecat")
+	cmd.Dir = tmp
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("worktree-setup.sh succeeded when it should have refused (git context walks into parent):\n%s", out)
+	}
+	if !strings.Contains(string(out), "REFUSING") {
+		t.Fatalf("worktree-setup.sh failed but output missing 'REFUSING':\n%s", out)
+	}
+	// Worktree must not have been created.
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("worktree was created despite REFUSING guard: %s", wt)
+	}
+}
+
+// TestWorktreeSetupRefusesWhenExistingWorktreeOriginMismatches is the
+// regression test for gs-xzr: a polecat session home that was created as a
+// worktree of the wrong repo (e.g., the city repo before the rig had a .git
+// pointer file) must be rejected on subsequent calls rather than silently
+// reused. The idempotency origin guard must detect this and exit non-zero.
+func TestWorktreeSetupRefusesWhenExistingWorktreeOriginMismatches(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	script := filepath.Join(exampleDir(), "..", "lifecycle", "packs", "lifecycle", "assets", "scripts", "worktree-setup.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Skipf("lifecycle worktree-setup.sh not found (%v); skipping", err)
+	}
+
+	tmp := t.TempDir()
+
+	// bares/ holds two bare repos so we can use file:// URLs as origins.
+	bares := filepath.Join(tmp, "bares")
+	if err := os.MkdirAll(bares, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create bare repo A (the "rig" remote).
+	bareA := filepath.Join(bares, "repo-a.git")
+	runCmd(t, tmp, "git", "init", "--bare", bareA)
+
+	// Create bare repo B (the "wrong" remote).
+	bareB := filepath.Join(bares, "repo-b.git")
+	runCmd(t, tmp, "git", "init", "--bare", bareB)
+
+	// Repo A: the rig repo with an origin pointing to bareA.
+	rigRoot := filepath.Join(tmp, "rig-repo-a")
+	runCmd(t, tmp, "git", "init", rigRoot)
+	runCmd(t, rigRoot, "git", "config", "user.email", "test@example.com")
+	runCmd(t, rigRoot, "git", "config", "user.name", "Gastown Test")
+	runCmd(t, rigRoot, "git", "remote", "add", "origin", "file://"+bareA)
+	if err := os.WriteFile(filepath.Join(rigRoot, "README.md"), []byte("rig-a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(t, rigRoot, "git", "add", ".")
+	runCmd(t, rigRoot, "git", "commit", "-m", "init")
+
+	// Repo B: a different repo with origin pointing to bareB. We will create
+	// a worktree of B at the target path to simulate the stale session home.
+	repoB := filepath.Join(tmp, "repo-b")
+	runCmd(t, tmp, "git", "init", repoB)
+	runCmd(t, repoB, "git", "config", "user.email", "test@example.com")
+	runCmd(t, repoB, "git", "config", "user.name", "Gastown Test")
+	runCmd(t, repoB, "git", "remote", "add", "origin", "file://"+bareB)
+	if err := os.WriteFile(filepath.Join(repoB, "README.md"), []byte("repo-b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(t, repoB, "git", "add", ".")
+	runCmd(t, repoB, "git", "commit", "-m", "init")
+
+	// Create a worktree of repo B at the would-be session-home path.
+	// This simulates a stale worktree from before the rig had its .git pointer.
+	wt := filepath.Join(tmp, "worktrees", "polecat-home")
+	if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(t, repoB, "git", "worktree", "add", wt, "-b", "stale-branch")
+
+	// Now call worktree-setup.sh with the rig root (repo A) and the existing
+	// worktree path (repo B). The idempotency origin guard must refuse.
+	cmd := exec.Command("sh", script, rigRoot, wt, "polecat")
+	cmd.Dir = tmp
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("worktree-setup.sh succeeded when it should have refused (existing worktree is from wrong repo):\n%s", out)
+	}
+	if !strings.Contains(string(out), "REFUSING") {
+		t.Fatalf("worktree-setup.sh failed but output missing 'REFUSING':\n%s", out)
+	}
+}
+
 func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T) {
 	mayorPrompt, err := os.ReadFile(filepath.Join(packRoot(), "packs", "gastown", "agents", "mayor", "prompt.template.md"))
 	if err != nil {
@@ -2119,18 +2250,20 @@ func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
 			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
-			rel:    "packs/gastown/template-fragments/propulsion.template.md",
-			start:  `{{ define "propulsion-polecat" }}`,
-			end:    `{{ define "propulsion-refinery" }}`,
-			want:   assignedInProgressTemplate,
-			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+			rel:            "packs/gastown/template-fragments/propulsion.template.md",
+			start:          `{{ define "propulsion-polecat" }}`,
+			end:            `{{ define "propulsion-refinery" }}`,
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{hookClaimJSON},
+			forbid:         []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
 		},
 		{
-			rel:    "packs/gastown/template-fragments/propulsion.template.md",
-			start:  `{{ define "propulsion-refinery" }}`,
-			end:    `{{ define "propulsion-dog" }}`,
-			want:   assignedInProgressTemplate,
-			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+			rel:            "packs/gastown/template-fragments/propulsion.template.md",
+			start:          `{{ define "propulsion-refinery" }}`,
+			end:            `{{ define "propulsion-dog" }}`,
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{`gc bd query 'ephemeral=true AND (status=open OR status=in_progress)'`},
+			forbid:         []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
@@ -2161,18 +2294,20 @@ func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/gastown/template-fragments/propulsion.template.md",
-			start:  `{{ define "propulsion-polecat" }}`,
-			end:    `{{ define "propulsion-refinery" }}`,
-			want:   assignedInProgressTemplate,
-			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+			rel:            "packs/gastown/template-fragments/propulsion.template.md",
+			start:          `{{ define "propulsion-polecat" }}`,
+			end:            `{{ define "propulsion-refinery" }}`,
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{hookClaimJSON},
+			forbid:         []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/gastown/template-fragments/propulsion.template.md",
-			start:  `{{ define "propulsion-refinery" }}`,
-			end:    `{{ define "propulsion-dog" }}`,
-			want:   assignedInProgressTemplate,
-			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+			rel:            "packs/gastown/template-fragments/propulsion.template.md",
+			start:          `{{ define "propulsion-refinery" }}`,
+			end:            `{{ define "propulsion-dog" }}`,
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{`gc bd query 'ephemeral=true AND (status=open OR status=in_progress)'`},
+			forbid:         []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
 			rel:            "packs/gastown/agents/polecat/prompt.template.md",
@@ -2205,17 +2340,22 @@ func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
 		// and must be found with `gc bd`, not the bare-bd shared query that
 		// resolves to the rig ledger. Its startup/no-idle wisp reconciliation
 		// is covered by TestWitnessStartupAndNoIdleReconcileWisps.
+		// The refinery Startup section uses gc bd query (ephemeral=true) directly
+		// rather than {{ .AssignedInProgressQuery }} — patrol wisps are ephemeral
+		// beads invisible to bd list, so the refinery hardcodes the ephemeral
+		// query (gs-ww0). This is intentional and differs from other roles.
 		{
-			rel:     "packs/gastown/agents/refinery/prompt.template.md",
-			start:   "# Step 1: Check for an in-progress patrol wisp",
-			end:     "Then follow the formula.",
-			want:    assignedInProgressTemplate,
-			forbid:  []string{`gc bd list --assignee="$GC_AGENT" --status=in_progress`},
-			render:  true,
-			agent:   "gastown/refinery",
-			tmpl:    "refinery",
-			rig:     "gastown",
-			binding: "gastown.",
+			rel:           "packs/gastown/agents/refinery/prompt.template.md",
+			start:         "## Startup",
+			end:           "Then follow the formula.",
+			want:          "gc bd query --json 'ephemeral=true AND (status=open OR status=in_progress)'",
+			forbid:        []string{`gc bd list --assignee="$GC_AGENT" --status=in_progress`},
+			render:        true,
+			renderedWants: []string{"gc bd query --json 'ephemeral=true AND (status=open OR status=in_progress)'"},
+			agent:         "gastown/refinery",
+			tmpl:          "refinery",
+			rig:           "gastown",
+			binding:       "gastown.",
 		},
 	}
 	for _, check := range checks {
@@ -2289,14 +2429,14 @@ func TestPolecatStartupUsesHookClaim(t *testing.T) {
 }
 
 // TestWitnessStartupAndNoIdleReconcileWisps is the regression guard for the
-// town-wide witness wisp leak (ga-7c6). The witness's patrol wisps are
-// ephemeral molecules on the town ledger, poured/assigned with `gc bd`. Its
-// startup work-check and no-idle guard must therefore (1) look them up with
-// `gc bd`, not the bare-bd shared query that resolves to the rig ledger and
-// never sees them; (2) filter `--type=molecule`, never the invalid
-// `--type=wisp` (not a valid bd issue type — the query errors and matches
-// nothing); and (3) reconcile duplicates to exactly one by burning the
-// surplus, so restarts never accumulate wisps.
+// town-wide witness wisp leak (ga-7c6 / gs-ww0). The witness's patrol wisps
+// are ephemeral molecules on the town ledger, poured/assigned with `gc bd`.
+// Its startup work-check and no-idle guard must therefore (1) look them up
+// with `gc bd query --json 'ephemeral=true ...'`, not `gc bd list
+// --type=molecule` which is blind to ephemeral beads and returns nothing
+// (causing duplicate wisps on every restart); (2) filter
+// .issue_type=="molecule" in the jq expression; and (3) reconcile duplicates
+// to exactly one by burning the surplus, so restarts never accumulate wisps.
 func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
 	rendered := renderGastownPromptForPack(t,
 		"packs/gastown/agents/witness/prompt.template.md",
@@ -2311,6 +2451,14 @@ func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
 		}
 	}
 
+	// Bug 3 (gs-ww0): `gc bd list` is blind to ephemeral beads. Must use
+	// `gc bd query --json 'ephemeral=true ...'` instead.
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, "gc bd list") && strings.Contains(line, "--type=molecule") {
+			t.Errorf("witness prompt uses gc bd list --type=molecule which cannot see ephemeral beads (duplicate wisps on restart): %q", line)
+		}
+	}
+
 	// Startup work-check: between "## Startup Protocol" and "**Hook ->".
 	startup := sectionBetween(t, rendered, "## Startup Protocol", "**Hook ->")
 	// Bug 1: must not run the bare-bd shared query (rig ledger) in startup.
@@ -2322,11 +2470,12 @@ func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
 			t.Errorf("witness startup must not use the bare-bd shared query %q; patrol wisps live on the town ledger via gc bd", bare)
 		}
 	}
-	// Must look up its own wisps on the town ledger with gc bd + --type=molecule,
-	// then reconcile to one by burning surplus.
+	// Must look up ephemeral wisps via gc bd query (not list), filter by
+	// issue_type=="molecule" in jq, then reconcile to one by burning surplus.
 	for _, want := range []string{
-		`gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule`,
-		`gc bd list --assignee="$GC_AGENT" --status=open --type=molecule`,
+		`gc bd query --json 'ephemeral=true AND status=in_progress'`,
+		`gc bd query --json 'ephemeral=true AND status=open'`,
+		`issue_type=="molecule"`,
 		"gc bd mol burn",
 	} {
 		if !strings.Contains(startup, want) {
@@ -2337,8 +2486,9 @@ func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
 	// No-idle guard: between its heading and "## Context Exhaustion".
 	noIdle := sectionBetween(t, rendered, "## CRITICAL: No Idle State Between Cycles", "## Context Exhaustion")
 	for _, want := range []string{
-		`gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule`,
-		`gc bd list --assignee="$GC_AGENT" --status=open --type=molecule`,
+		`gc bd query --json 'ephemeral=true AND status=in_progress'`,
+		`gc bd query --json 'ephemeral=true AND status=open'`,
+		`issue_type=="molecule"`,
 		"gc bd mol burn",
 	} {
 		if !strings.Contains(noIdle, want) {
@@ -2850,8 +3000,8 @@ func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
 				`run ` + "`gc hook`" + ` immediately`,
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-				`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`CURRENT_WISP=$(gc bd query --json 'ephemeral=true AND status=in_progress' --limit=0 | jq -r --arg a "$GC_AGENT" '[.[] | select(.assignee==$a and .issue_type=="molecule")] | .[0].id // empty')`,
+				`ASSIGNED_WISP=$(gc bd query --json 'ephemeral=true AND status=open' --limit=0 | jq -r --arg a "$GC_AGENT" '[.[] | select(.assignee==$a and .issue_type=="molecule")] | .[0].id // empty')`,
 				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
 				`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
@@ -2871,15 +3021,16 @@ func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
 			agentName: "gascity/gastown.witness",
 			template:  "witness",
 			formula:   "mol-witness-patrol",
-			// The witness no-idle guard finds its own patrol wisps with
-			// --type=molecule (never the invalid --type=wisp) and reconciles
-			// surplus open wisps to exactly one by burning extras (ga-7c6).
+			// The witness no-idle guard finds its own patrol wisps via
+			// gc bd query (ephemeral=true) — bd list never returns ephemeral
+			// beads (gs-ww0) — and reconciles surplus open wisps to exactly
+			// one by burning extras (ga-7c6).
 			wantOrder: []string{
 				`run ` + "`gc hook`" + ` immediately`,
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
-				`OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id')`,
+				`CURRENT_WISP=$(gc bd query --json 'ephemeral=true AND status=in_progress' --limit=0 | jq -r --arg a "$GC_AGENT" '[.[] | select(.assignee==$a and .issue_type=="molecule")] | .[0].id // empty')`,
+				`OPEN_WISPS=$(gc bd query --json 'ephemeral=true AND status=open' --limit=0 | jq -r --arg a "$GC_AGENT" '[.[] | select(.assignee==$a and .issue_type=="molecule")] | .[].id')`,
 				`ASSIGNED_WISP=$(printf '%s\n' $OPEN_WISPS | sed -n '1p')`,
 				`gc bd mol burn "$extra" --force`,
 				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
@@ -2939,10 +3090,12 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 			name: "prompt",
 			body: promptRestart,
 			wantOrder: []string{
+				`LIVE_WISPS=$(gc bd query --json 'ephemeral=true AND (status=open OR status=in_progress)'`,
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
-				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-				`fi`,
+				`NEXT=""`,
+				`for w in $LIVE_WISPS; do`,
+				`if [ "$w" != "$CURRENT_WISP" ]; then NEXT="$w"; break; fi`,
+				`if [ -z "$NEXT" ]; then`,
 				`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
 				`echo "Could not pour next refinery wisp; not requesting restart."`,
@@ -2950,12 +3103,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
 				`echo "Could not assign next refinery wisp; not requesting restart."`,
 				`exit 1`,
-				`if [ -n "$CURRENT_WISP" ]; then`,
-				`gc bd mol burn "$CURRENT_WISP" --force`,
-				`else`,
-				`echo "Could not resolve current wisp; not requesting restart."`,
-				`exit 1`,
-				`fi`,
+				`gc bd mol burn "$w" --force || true`,
 				`gc runtime request-restart`,
 				`RESTART_STATUS=$?`,
 				`exit "$RESTART_STATUS"`,
@@ -2965,10 +3113,12 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 			name: "formula",
 			body: formulaRestart,
 			wantOrder: []string{
+				`LIVE_WISPS=$(gc bd query --json 'ephemeral=true AND (status=open OR status=in_progress)'`,
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
-				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-				`fi`,
+				`NEXT=""`,
+				`for w in $LIVE_WISPS; do`,
+				`if [ "$w" != "$CURRENT_WISP" ]; then NEXT="$w"; break; fi`,
+				`if [ -z "$NEXT" ]; then`,
 				`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
 				`echo "Could not pour next refinery wisp; not requesting restart."`,
@@ -2976,12 +3126,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
 				`echo "Could not assign next refinery wisp; not requesting restart."`,
 				`exit 1`,
-				`if [ -n "$CURRENT_WISP" ]; then`,
-				`gc bd mol burn "$CURRENT_WISP" --force`,
-				`else`,
-				`echo "Could not resolve current wisp; not requesting restart."`,
-				`exit 1`,
-				`fi`,
+				`gc bd mol burn "$w" --force || true`,
 				`gc runtime request-restart`,
 				`RESTART_STATUS=$?`,
 				`exit "$RESTART_STATUS"`,
@@ -3003,12 +3148,14 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 		}
 	}
 
-	patrolLifecycle := sectionBetween(t, promptBody, "### 1. ALWAYS pour the next wisp before burning the current one", "### 2. Request restart on heavy context")
+	patrolLifecycle := sectionBetween(t, promptBody, "### 1. ALWAYS secure the next wisp before burning the current one", "### 2. Request restart on heavy context")
 	assertContainsInOrder(t, patrolLifecycle,
+		`LIVE_WISPS=$(gc bd query --json 'ephemeral=true AND (status=open OR status=in_progress)'`,
 		`CURRENT_WISP=${GC_BEAD_ID:-}`,
-		`if [ -z "$CURRENT_WISP" ]; then`,
-		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-		`fi`,
+		`NEXT=""`,
+		`for w in $LIVE_WISPS; do`,
+		`if [ "$w" != "$CURRENT_WISP" ]; then NEXT="$w"; break; fi`,
+		`if [ -z "$NEXT" ]; then`,
 		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')`,
 		`if [ -z "$NEXT" ]; then`,
 		`echo "Could not pour next refinery wisp; not burning."`,
@@ -3016,12 +3163,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
 		`echo "Could not assign next refinery wisp; not burning."`,
 		`exit 1`,
-		`if [ -n "$CURRENT_WISP" ]; then`,
-		`gc bd mol burn "$CURRENT_WISP" --force`,
-		`else`,
-		`echo "Could not resolve current wisp; not burning."`,
-		`exit 1`,
-		`fi`,
+		`gc bd mol burn "$w" --force || true`,
 	)
 	assertContainsInOrder(t, patrolLifecycle,
 		"The next wisp re-scans after `event_timeout` and stays assigned until branch",
@@ -3933,7 +4075,7 @@ func TestDeaconPatrolNextIterationBurnsCurrentBeforeIdleExit(t *testing.T) {
 	assertContainsInOrder(t, section,
 		`CURRENT_WISP=${GC_BEAD_ID:-}`,
 		`if [ -z "$CURRENT_WISP" ]; then`,
-		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`CURRENT_WISP=$(gc bd query --json 'ephemeral=true AND status=in_progress' --limit=0 | jq -r --arg a "$GC_AGENT" '[.[] | select(.assignee==$a and .issue_type=="molecule")] | .[0].id // empty')`,
 		`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')`,
 		`if [ -z "$NEXT" ]; then`,
 		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
@@ -3966,7 +4108,7 @@ func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
 	body := string(data)
 
 	for _, want := range []string{
-		`gc bd list --assignee="$GC_AGENT" --status=in_progress`,
+		`jq -r --arg a "$GC_AGENT" '[.[] | select(.assignee==$a and .issue_type=="molecule")]`,
 		`gc bd update "$WISP" --assignee="$GC_AGENT"`,
 		`| Find assigned work | ` + "`" + `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
 	} {
