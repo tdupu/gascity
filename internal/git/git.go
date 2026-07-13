@@ -66,14 +66,16 @@ func (g *Git) CurrentBranchCtx(ctx context.Context) (string, error) {
 // clone (e.g., rigs added before gc rig add auto-detected the default
 // branch). See gc-8cowk / gc-ao9t.
 func (g *Git) DefaultBranch() (string, error) {
-	if out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+	// runScoped sets GIT_CEILING_DIRECTORIES so that discovery cannot walk into
+	// a parent repository when workDir is an unpopulated rig directory.
+	if out, err := g.runScoped("symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
 		ref := strings.TrimSpace(out)
 		if branch := strings.TrimPrefix(ref, "refs/remotes/origin/"); branch != "" {
 			return branch, nil
 		}
 	}
 	for _, candidate := range []string{"main", "master"} {
-		if _, err := g.run("show-ref", "--verify", "--quiet", "refs/remotes/origin/"+candidate); err == nil {
+		if _, err := g.runScoped("show-ref", "--verify", "--quiet", "refs/remotes/origin/"+candidate); err == nil {
 			return candidate, nil
 		}
 	}
@@ -90,7 +92,9 @@ func (g *Git) DefaultBranch() (string, error) {
 // Use this at registration time (gc rig add) where we want to record the
 // repo's actual mainline rather than a generic "main" placeholder.
 func (g *Git) ProbeDefaultBranch() string {
-	if out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+	// runScoped sets GIT_CEILING_DIRECTORIES so that discovery cannot walk into
+	// a parent repository when workDir is an unpopulated rig directory.
+	if out, err := g.runScoped("symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
 		ref := strings.TrimSpace(out)
 		if branch := strings.TrimPrefix(ref, "refs/remotes/origin/"); branch != "" {
 			return branch
@@ -207,6 +211,35 @@ func (g *Git) WorktreePrune() error {
 		return fmt.Errorf("pruning worktrees: %w", err)
 	}
 	return nil
+}
+
+// RemoteURL returns the push URL for the named remote (e.g. "origin"). Uses
+// runScoped so that GIT_CEILING_DIRECTORIES is set to the parent of workDir,
+// preventing git discovery from walking into an enclosing repository when
+// workDir is a rig directory that is not yet a git repo. This makes it safe
+// to call on rig roots at spawn time even when the rig hasn't been cloned yet.
+//
+// Returns ("", err) when the remote doesn't exist or git is unavailable. A
+// non-empty return value guarantees that workDir's own git context (not a
+// discovered parent's) provided the URL.
+func (g *Git) RemoteURL(name string) (string, error) {
+	out, err := g.runScoped("remote", "get-url", name)
+	if err != nil {
+		return "", fmt.Errorf("getting remote URL for %q: %w", name, err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// AbsGitDir returns the absolute path to the git admin directory for workDir.
+// Uses runScoped so git discovery cannot walk into a parent repository when
+// workDir lacks its own .git entry — the canonical guard against cross-repo
+// worktree leakage (gt-4rn). Returns ("", err) when workDir is not a git repo.
+func (g *Git) AbsGitDir() (string, error) {
+	out, err := g.runScoped("rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return "", fmt.Errorf("resolving absolute git dir: %w", err)
+	}
+	return filepath.Clean(strings.TrimSpace(out)), nil
 }
 
 // Fetch runs git fetch origin to update remote tracking branches.
@@ -338,6 +371,35 @@ func SanitizedEnv() []string {
 	return sanitizeGitEnv(os.Environ())
 }
 
+// ScopedEnv returns the sanitized git environment with GIT_CEILING_DIRECTORIES
+// set to filepath.Dir(workDir), preventing git discovery from walking into a
+// parent repository when workDir is not itself a git repo. Any inherited
+// GIT_CEILING_DIRECTORIES is stripped so the scoped value always takes effect.
+//
+// Use this for branch-probe git commands (symbolic-ref, show-ref) that must not
+// discover a parent repo when a rig directory is unpopulated or otherwise lacks
+// a .git of its own.
+func ScopedEnv(workDir string) []string {
+	environ := os.Environ()
+	env := make([]string, 0, len(environ)+1)
+	for _, e := range environ {
+		k, _, _ := strings.Cut(e, "=")
+		if gitEnvBlacklist[k] || k == "GIT_CEILING_DIRECTORIES" {
+			continue
+		}
+		env = append(env, e)
+	}
+	if workDir == "" {
+		return env
+	}
+	cleaned := filepath.Clean(workDir)
+	ceiling := filepath.Dir(cleaned)
+	if ceiling != "" && ceiling != cleaned {
+		env = append(env, "GIT_CEILING_DIRECTORIES="+ceiling)
+	}
+	return env
+}
+
 // HermeticEnv returns a process environment for git subprocesses that must run
 // hermetically against a cached clone, isolated from ambient system, global,
 // and parent-repository git state. It strips everything SanitizedEnv removes
@@ -421,6 +483,19 @@ func (g *Git) runCtx(ctx context.Context, args ...string) (string, error) {
 	cmd.Dir = g.workDir
 	// Build clean env: inherit everything except git-specific vars.
 	cmd.Env = sanitizeGitEnv(os.Environ())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+	}
+	return string(out), nil
+}
+
+// runScoped is like run but uses ScopedEnv so that git discovery cannot walk
+// into a parent repository when g.workDir is not itself a git repo.
+func (g *Git) runScoped(args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = g.workDir
+	cmd.Env = ScopedEnv(g.workDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)

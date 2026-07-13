@@ -118,6 +118,34 @@ func TestHermeticEnvStripsDiscoveryAndConfigVarsAndPinsHermeticConfig(t *testing
 	}
 }
 
+func TestScopedEnvSetsCeilingAndStripsGitVars(t *testing.T) {
+	t.Setenv("GIT_DIR", "/poison/.git")
+	t.Setenv("GIT_CEILING_DIRECTORIES", "/inherited-ceiling")
+	env := ScopedEnv("/repos/my-rig")
+	seen := map[string]string{}
+	for _, e := range env {
+		k, v, _ := strings.Cut(e, "=")
+		seen[k] = v
+	}
+	if _, ok := seen["GIT_DIR"]; ok {
+		t.Error("ScopedEnv kept GIT_DIR (should be stripped)")
+	}
+	// The inherited value is replaced with our workDir-derived ceiling.
+	if got := seen["GIT_CEILING_DIRECTORIES"]; got != "/repos" {
+		t.Errorf("GIT_CEILING_DIRECTORIES = %q, want /repos (parent of /repos/my-rig)", got)
+	}
+}
+
+func TestScopedEnvEmptyWorkDir(t *testing.T) {
+	t.Setenv("GIT_CEILING_DIRECTORIES", "/some-ceiling")
+	env := ScopedEnv("")
+	for _, e := range env {
+		if k, _, _ := strings.Cut(e, "="); k == "GIT_CEILING_DIRECTORIES" {
+			t.Error("ScopedEnv('') should not set GIT_CEILING_DIRECTORIES when workDir is empty")
+		}
+	}
+}
+
 func TestIsRepo(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)
@@ -308,12 +336,69 @@ func TestProbeDefaultBranch_FallsBackToCurrentBranch(t *testing.T) {
 }
 
 func TestProbeDefaultBranch_NoRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// No t.Setenv for GIT_CEILING_DIRECTORIES — ProbeDefaultBranch must set
+	// the ceiling internally via runScoped so callers don't have to.
 	dir := t.TempDir()
-	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
 	g := New(dir)
 	got := g.ProbeDefaultBranch()
 	if got != "" {
 		t.Errorf("ProbeDefaultBranch() = %q, want empty (no repo)", got)
+	}
+}
+
+// TestDefaultBranch_NonGitDirDoesNotDiscoverParentRepo is the regression test
+// for the core defect: git discovery walking up from an unpopulated rig directory
+// into the city parent git repo and returning the wrong branch. With the ceiling
+// fix in runScoped, DefaultBranch must not return the parent repo's branch.
+func TestDefaultBranch_NonGitDirDoesNotDiscoverParentRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// Set up a parent directory that IS a git repo with a known non-main default.
+	parentRepo := t.TempDir()
+	runGit(t, parentRepo, "init")
+	// Wire origin/HEAD to a known branch without a real remote push.
+	runGit(t, parentRepo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/definitely-not-main")
+
+	// subdir is NOT a git repo but lives inside parentRepo — exactly the
+	// unpopulated rig scenario where discovery would walk into parentRepo.
+	subdir := filepath.Join(parentRepo, "unpopulated-rig")
+	if err := os.Mkdir(subdir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	g := New(subdir)
+	branch, err := g.DefaultBranch()
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if branch == "definitely-not-main" {
+		t.Fatalf("DefaultBranch() = %q: git discovery walked into parent repo (ceiling fix missing)", branch)
+	}
+}
+
+// TestProbeDefaultBranch_NonGitDirDoesNotDiscoverParentRepo mirrors the
+// DefaultBranch regression test for ProbeDefaultBranch.
+func TestProbeDefaultBranch_NonGitDirDoesNotDiscoverParentRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	parentRepo := t.TempDir()
+	runGit(t, parentRepo, "init")
+	runGit(t, parentRepo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/definitely-not-main")
+
+	subdir := filepath.Join(parentRepo, "unpopulated-rig")
+	if err := os.Mkdir(subdir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	g := New(subdir)
+	got := g.ProbeDefaultBranch()
+	if got == "definitely-not-main" {
+		t.Fatalf("ProbeDefaultBranch() = %q: git discovery walked into parent repo (ceiling fix missing)", got)
 	}
 }
 
@@ -704,6 +789,102 @@ func TestWorktreePrune(t *testing.T) {
 	// Prune on a clean repo should not fail.
 	if err := g.WorktreePrune(); err != nil {
 		t.Fatalf("WorktreePrune: %v", err)
+	}
+}
+
+func TestRemoteURL_ReturnsConfiguredURL(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	repo := initTestRepo(t)
+	runGit(t, repo, "remote", "add", "origin", "git@github.com:example/repo.git")
+
+	g := New(repo)
+	got, err := g.RemoteURL("origin")
+	if err != nil {
+		t.Fatalf("RemoteURL: %v", err)
+	}
+	if got != "git@github.com:example/repo.git" {
+		t.Errorf("RemoteURL = %q, want %q", got, "git@github.com:example/repo.git")
+	}
+}
+
+func TestRemoteURL_ErrorWhenNoRemote(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	repo := initTestRepo(t)
+	g := New(repo)
+	_, err := g.RemoteURL("origin")
+	if err == nil {
+		t.Error("RemoteURL: expected error for missing remote, got nil")
+	}
+}
+
+// TestRemoteURL_NonGitDirDoesNotDiscoverParentRemote is the spawn-time guard
+// regression test for gt-4rn / gs-v4m: when a rig directory has no .git
+// entry, RemoteURL must not discover the enclosing city/town repo's remote and
+// return it as if it were the rig's remote. With ScopedEnv the call must
+// return an error, not the parent's remote URL.
+func TestRemoteURL_NonGitDirDoesNotDiscoverParentRemote(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	// Set up a parent repo with a known remote.
+	parentRepo := t.TempDir()
+	runGit(t, parentRepo, "init")
+	runGit(t, parentRepo, "remote", "add", "origin", "git@github.com:parent/city.git")
+
+	// subdir has no .git — it is the "unpopulated rig" scenario.
+	subdir := filepath.Join(parentRepo, "unpopulated-rig")
+	if err := os.Mkdir(subdir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	g := New(subdir)
+	url, err := g.RemoteURL("origin")
+	// The scoped ceiling must prevent discovery; err should be non-nil.
+	if err == nil {
+		t.Errorf("RemoteURL in non-git dir returned %q (no error): git discovery walked into parent repo — spawn guard ceiling fix missing", url)
+	}
+}
+
+func TestAbsGitDir_ReturnsPathInsideRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	repo := initTestRepo(t)
+	g := New(repo)
+	dir, err := g.AbsGitDir()
+	if err != nil {
+		t.Fatalf("AbsGitDir: %v", err)
+	}
+	// Use canonical paths for comparison: on macOS /var -> /private/var.
+	canonRepo := testutil.CanonicalPath(repo)
+	canonDir := testutil.CanonicalPath(dir)
+	if !strings.HasPrefix(canonDir, canonRepo) {
+		t.Errorf("AbsGitDir = %q (canonical: %q), want prefix %q (canonical: %q)", dir, canonDir, repo, canonRepo)
+	}
+}
+
+// TestAbsGitDir_NonGitDirDoesNotDiscoverParent mirrors the RemoteURL regression
+// test: AbsGitDir must return an error for a non-git directory, not the parent
+// repo's git dir, because runScoped sets the ceiling to the parent directory.
+func TestAbsGitDir_NonGitDirDoesNotDiscoverParent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	parentRepo := t.TempDir()
+	runGit(t, parentRepo, "init")
+	subdir := filepath.Join(parentRepo, "subdir")
+	if err := os.Mkdir(subdir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	g := New(subdir)
+	dir, err := g.AbsGitDir()
+	if err == nil {
+		t.Errorf("AbsGitDir in non-git subdir returned %q (no error): discovery walked into parent repo — ceiling fix missing", dir)
 	}
 }
 

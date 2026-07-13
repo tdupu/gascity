@@ -236,6 +236,48 @@ func initGitRepoOnBranch(t *testing.T, branch string) string {
 	return dir
 }
 
+// TestRigRootBranchCheck_NonGitRigPathDoesNotDiscoverCityRepo is the regression
+// test for the core defect: when a rig path is not a git repo, runGitCommand
+// must not walk into a parent git repo and report the parent's branch. With the
+// ScopedEnv ceiling fix the check must return StatusWarning (unable to determine
+// branch), not report the parent repo's branch as if it were the rig's branch.
+func TestRigRootBranchCheck_NonGitRigPathDoesNotDiscoverCityRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	// parentRepo is a git repo on "definitely-not-main". Without the ceiling fix,
+	// a rig at subdir (which has no .git) would discover parentRepo and report
+	// "definitely-not-main" as the rig's current branch.
+	parentRepo := t.TempDir()
+	runGitForRigRootBranchTest(t, parentRepo, "init")
+	runGitForRigRootBranchTest(t, parentRepo, "checkout", "-b", "definitely-not-main")
+	runGitForRigRootBranchTest(t, parentRepo, "config", "user.name", "Test")
+	runGitForRigRootBranchTest(t, parentRepo, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(parentRepo, "README.md"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitForRigRootBranchTest(t, parentRepo, "add", "README.md")
+	runGitForRigRootBranchTest(t, parentRepo, "commit", "-m", "init")
+
+	subdir := filepath.Join(parentRepo, "unpopulated-rig")
+	if err := os.Mkdir(subdir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewRigRootBranchCheck(config.Rig{
+		Name:          "testrig",
+		Path:          subdir,
+		DefaultBranch: "main",
+	})
+	r := c.Run(&CheckContext{})
+	if r.Status == StatusOK {
+		t.Fatalf("status = StatusOK, want StatusWarning: non-git rig should not report OK (message: %s)", r.Message)
+	}
+	if strings.Contains(r.Message, "definitely-not-main") {
+		t.Fatalf("message = %q: rig check reported parent repo branch — ceiling fix missing", r.Message)
+	}
+}
+
 func runGitForRigRootBranchTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -79,10 +79,10 @@ func (c *RigRootBranchCheck) Run(_ *CheckContext) *CheckResult {
 func runGitCommand(gitBin, dir string, args ...string) (string, error) {
 	cmd := exec.Command(gitBin, args...)
 	cmd.Dir = dir
-	// Strip leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE (and related) variables
-	// so the branch resolves from dir, not a parent repository inherited from a
-	// pre-commit hook or nested worktree (which would warn on the wrong repo).
-	cmd.Env = git.SanitizedEnv()
+	// ScopedEnv strips GIT_DIR/GIT_WORK_TREE and sets GIT_CEILING_DIRECTORIES
+	// to parent(dir), preventing git discovery from walking into a parent
+	// repository when dir is an unpopulated rig (e.g., not yet cloned).
+	cmd.Env = git.ScopedEnv(dir)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -94,9 +94,10 @@ func runGitCommand(gitBin, dir string, args ...string) (string, error) {
 func isGitDirty(gitBin, dir string) (bool, error) {
 	cmd := exec.Command(gitBin, "status", "--porcelain")
 	cmd.Dir = dir
-	// Strip leaked git-locating variables so dirty-state resolves from dir, not a
-	// parent repository inherited from a pre-commit hook or nested worktree.
-	cmd.Env = git.SanitizedEnv()
+	// ScopedEnv strips GIT_DIR/GIT_WORK_TREE and sets GIT_CEILING_DIRECTORIES
+	// to parent(dir), preventing git discovery from walking into a parent
+	// repository when dir is an unpopulated rig.
+	cmd.Env = git.ScopedEnv(dir)
 	out, err := cmd.Output()
 	if err != nil {
 		return false, err

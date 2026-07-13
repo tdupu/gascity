@@ -406,11 +406,13 @@ func (r apiBranchResolver) DefaultBranch(dir string) string {
 	}
 	// Best-effort: read git's origin/HEAD ref for the default branch.
 	// Falls back to empty string if git is unavailable.
+	//
+	// ScopedEnv strips GIT_DIR/GIT_WORK_TREE and sets GIT_CEILING_DIRECTORIES
+	// to filepath.Dir(dir), preventing git discovery from walking into a parent
+	// repository when dir is an unpopulated rig path.
 	cmd := exec.CommandContext(context.Background(), "git", "-C", dir,
 		"symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-	// Sanitize the environment so a leaked GIT_DIR from a parent repo or hook
-	// cannot redirect resolution to the wrong repository's default branch.
-	cmd.Env = gitpkg.SanitizedEnv()
+	cmd.Env = gitpkg.ScopedEnv(dir)
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

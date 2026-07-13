@@ -38,8 +38,50 @@ else
     SYNC="${4:-}"
 fi
 
+# Spawn-time guard: refuse to create worktrees when RIG_ROOT's git context
+# resolves outside the rig root. Without a .git pointer file at the rig root,
+# git discovery walks up to the enclosing city repo, and every worktree
+# registered here binds to the wrong origin — wrong branches, wrong pushes,
+# and cross-rig remote leakage (gt-4rn / gs-v4m).
+# Resolve symlinks: on macOS /var/folders/ is a symlink to /private/var/folders/,
+# so cd -P is needed for the pattern match to work against git's resolved GITDIR.
+RIG_ROOT_REAL=$(cd -P "$RIG_ROOT" 2>/dev/null && pwd) || RIG_ROOT_REAL="$RIG_ROOT"
+GITDIR=$(git -C "$RIG_ROOT" rev-parse --absolute-git-dir 2>/dev/null) || {
+    echo "worktree-setup: $RIG_ROOT is not a git repository" >&2
+    exit 1
+}
+case "$GITDIR" in
+    "$RIG_ROOT_REAL"/*) : ;;  # .repo.git or .git is inside the rig — OK
+    *)
+        echo "worktree-setup: REFUSING to create worktree for $RIG_ROOT:" >&2
+        echo "  git dir resolves OUTSIDE the rig root ($GITDIR)." >&2
+        echo "  Ensure a .git pointer file exists at $RIG_ROOT (gt-4rn)." >&2
+        exit 1
+        ;;
+esac
+
+# Verify the rig root has an origin remote. A rig whose origin URL would
+# come from a parent-repo walk (caught above) or from a bare city checkout
+# risks push leakage; a non-empty URL here confirms we have the right repo.
+RIG_ORIGIN=$(git -C "$RIG_ROOT" remote get-url origin 2>/dev/null) || {
+    echo "worktree-setup: WARNING: $RIG_ROOT has no 'origin' remote — push from worktree will fail" >&2
+}
+
 # Idempotent: skip if worktree already exists.
 if [ -d "$WT/.git" ] || [ -f "$WT/.git" ]; then
+    # Idempotency origin guard: an existing worktree must be registered with
+    # the same repo as the rig root. A stale session-home worktree from before
+    # the .git pointer was set up could be a city-repo worktree — allowing it
+    # would cause per-bead commits to land in the wrong remote (gs-xzr).
+    if [ -n "$RIG_ORIGIN" ]; then
+        WT_ORIGIN=$(git -C "$WT" remote get-url origin 2>/dev/null) || WT_ORIGIN=""
+        if [ "$WT_ORIGIN" != "$RIG_ORIGIN" ]; then
+            echo "worktree-setup: REFUSING to reuse $WT:" >&2
+            echo "  existing worktree origin ($WT_ORIGIN) != rig origin ($RIG_ORIGIN)." >&2
+            echo "  Remove this worktree and let gc recreate it: git -C $RIG_ROOT worktree remove --force $WT" >&2
+            exit 1
+        fi
+    fi
     [ "$SYNC" = "--sync" ] && { git -C "$WT" fetch origin 2>/dev/null; git -C "$WT" pull --rebase 2>/dev/null || true; }
     exit 0
 fi
@@ -110,6 +152,20 @@ if [ -n "$STAGE" ]; then
     STAGE=""
 fi
 trap - EXIT HUP INT TERM
+
+# Post-creation origin guard: the new worktree's origin must match the rig
+# root's origin. A mismatch means the worktree was registered in the wrong
+# repo (e.g., because a parent-repo walk slipped past the pre-flight check).
+if [ -n "$RIG_ORIGIN" ]; then
+    WT_ORIGIN=$(git -C "$WT" remote get-url origin 2>/dev/null) || true
+    if [ "$WT_ORIGIN" != "$RIG_ORIGIN" ]; then
+        echo "worktree-setup: CRITICAL: worktree origin ($WT_ORIGIN) != rig origin ($RIG_ORIGIN)" >&2
+        echo "  Worktree was registered in the wrong repo. Removing." >&2
+        git -C "$RIG_ROOT" worktree remove --force "$WT" 2>/dev/null || rm -rf "$WT"
+        restore_stage
+        exit 1
+    fi
+fi
 
 # Bead redirect for filesystem beads.
 mkdir -p "$WT/.beads"

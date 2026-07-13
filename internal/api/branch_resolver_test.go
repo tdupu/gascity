@@ -1,6 +1,7 @@
 package api
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -31,6 +32,32 @@ func TestApiBranchResolverIgnoresPoisonedGitEnv(t *testing.T) {
 	r := apiBranchResolver{}
 	if got := r.DefaultBranch(repo); got != "main" {
 		t.Fatalf("DefaultBranch under poisoned GIT_* env = %q, want %q", got, "main")
+	}
+}
+
+// TestApiBranchResolverDoesNotWalkToParentRepo is the regression test for the
+// core defect: git discovery walking from an unpopulated rig directory up into
+// the city parent git repo and returning the wrong branch. With ScopedEnv,
+// DefaultBranch must not return the parent repo's branch.
+func TestApiBranchResolverDoesNotWalkToParentRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available in PATH")
+	}
+	// parentRepo is a git repo with a non-main default branch via origin/HEAD.
+	parentRepo := t.TempDir()
+	runResolverGit(t, parentRepo, "init")
+	runResolverGit(t, parentRepo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/definitely-not-main")
+
+	// subdir is NOT a git repo but lives inside parentRepo — exactly the
+	// unpopulated rig scenario where discovery would walk into parentRepo.
+	subdir := filepath.Join(parentRepo, "unpopulated-rig")
+	if err := os.Mkdir(subdir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	r := apiBranchResolver{}
+	if got := r.DefaultBranch(subdir); got == "definitely-not-main" {
+		t.Fatalf("DefaultBranch(%q) = %q: git discovery walked into parent repo (ScopedEnv ceiling fix missing)", subdir, got)
 	}
 }
 
