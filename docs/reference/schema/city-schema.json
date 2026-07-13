@@ -1990,6 +1990,22 @@
           "type": "string",
           "description": "Interval overrides the cooldown interval. Go duration string."
         },
+        "interval_min": {
+          "type": "string",
+          "description": "IntervalMin overrides the lower bound for dynamic interval hints. Go duration string."
+        },
+        "interval_max": {
+          "type": "string",
+          "description": "IntervalMax overrides the upper bound for dynamic interval hints. Go duration string."
+        },
+        "alert_after": {
+          "type": "string",
+          "description": "AlertAfter overrides the doctor warning threshold. Go duration string."
+        },
+        "critical_after": {
+          "type": "string",
+          "description": "CriticalAfter overrides the doctor critical threshold. Go duration string."
+        },
         "schedule": {
           "type": "string",
           "description": "Schedule overrides the cron expression."

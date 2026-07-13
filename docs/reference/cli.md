@@ -2389,6 +2389,7 @@ gc order
 | [gc order history](#gc-order-history) | Show order execution history |
 | [gc order list](#gc-order-list) | List available orders |
 | [gc order run](#gc-order-run) | Execute an order manually |
+| [gc order set-interval](#gc-order-set-interval) | Set the cooldown interval for an order override in city.toml |
 | [gc order show](#gc-order-show) | Show details of an order |
 | [gc order sweep-nudge-mail](#gc-order-sweep-nudge-mail) | Close stale delivered nudge beads and read mail beads |
 | [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale and prune closed order-tracking beads |
@@ -2462,6 +2463,24 @@ gc order run <name> [flags]
 | `--json` | bool |  | JSON output (formula orders only; rejected for exec orders) |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
 | `--var` | stringArray |  | order arg as key=value (repeatable): formula var / exec env |
+
+## gc order set-interval
+
+Set the [[orders.overrides]] interval field for a named order in city.toml.
+
+Creates or updates an override entry for the named order with the given
+Go duration string as the interval (e.g. 30m, 2h, 24h). This provides a
+policy-compliant alternative to hand-editing city.toml (POLICY.md P1.2).
+
+Use --rig to scope the override to a specific rig's order.
+
+```
+gc order set-interval <name> <duration> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--rig` | string |  | rig name to scope the override |
 
 ## gc order show
 

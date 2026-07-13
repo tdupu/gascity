@@ -1606,6 +1606,254 @@ scope = "city"
 	}
 }
 
+func TestImport_DefaultRigImportsApplyToAllRigs(t *testing.T) {
+	// [defaults.rig.imports.*] is a city-level base layer for EVERY rig's
+	// import table, not a template stamped only at gc rig add time. A rig
+	// registered before a default was declared — or registered with its own
+	// explicit imports — still composes every default binding (gs-5wf).
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	packA := filepath.Join(dir, "pack-a")
+	packB := filepath.Join(dir, "pack-b")
+	packC := filepath.Join(dir, "pack-c")
+
+	for _, d := range []string{cityDir, packA, packB, packC} {
+		mustMkdirAll(t, d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[defaults.rig.imports.pa]
+source = "../pack-a"
+
+[defaults.rig.imports.pb]
+source = "../pack-b"
+
+[[rigs]]
+name = "one"
+path = "/tmp/one"
+
+[[rigs]]
+name = "two"
+path = "/tmp/two"
+
+[rigs.imports.local]
+source = "../pack-c"
+`)
+	writeTestFile(t, packA, "pack.toml", `
+[pack]
+name = "pack-a"
+schema = 1
+
+[[agent]]
+name = "alpha"
+scope = "rig"
+`)
+	writeTestFile(t, packB, "pack.toml", `
+[pack]
+name = "pack-b"
+schema = 1
+
+[[agent]]
+name = "beta"
+scope = "rig"
+`)
+	writeTestFile(t, packB, "formulas/noop.formula.toml", `
+description = "noop"
+
+[[steps]]
+id = "start"
+title = "Start"
+`)
+	writeTestFile(t, packC, "pack.toml", `
+[pack]
+name = "pack-c"
+schema = 1
+
+[[agent]]
+name = "gamma"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, a := range explicitAgents(cfg.Agents) {
+		found[a.QualifiedName()] = true
+	}
+
+	// Rig with no authored imports gets every default binding.
+	for _, want := range []string{"one/pa.alpha", "one/pb.beta"} {
+		if !found[want] {
+			t.Errorf("missing %s from default rig imports; got: %v", want, found)
+		}
+	}
+	// Rig with its own authored import gets the defaults IN ADDITION.
+	for _, want := range []string{"two/pa.alpha", "two/pb.beta", "two/local.gamma"} {
+		if !found[want] {
+			t.Errorf("missing %s; got: %v", want, found)
+		}
+	}
+
+	// Pack dirs registered per rig so order discovery sees default packs.
+	for _, rigName := range []string{"one", "two"} {
+		dirs := cfg.RigPackDirs[rigName]
+		for _, wantDir := range []string{packA, packB} {
+			if !containsPath(dirs, wantDir) {
+				t.Errorf("RigPackDirs[%q] missing %s; got: %v", rigName, wantDir, dirs)
+			}
+		}
+	}
+
+	// Formula layers pick up default pack formula dirs so the formula
+	// catalog and order scanner see pack formulas at rig scope.
+	packBFormulas := filepath.Join(packB, "formulas")
+	for _, rigName := range []string{"one", "two"} {
+		if !containsPath(cfg.FormulaLayers.Rigs[rigName], packBFormulas) {
+			t.Errorf("FormulaLayers.Rigs[%q] missing %s; got: %v",
+				rigName, packBFormulas, cfg.FormulaLayers.Rigs[rigName])
+		}
+	}
+}
+
+func TestImport_DefaultRigImportRigBindingOverrides(t *testing.T) {
+	// A rig's own [rigs.imports.<binding>] wins wholesale over a
+	// same-named [defaults.rig.imports.<binding>] entry.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	packA := filepath.Join(dir, "pack-a")
+	packB := filepath.Join(dir, "pack-b")
+
+	for _, d := range []string{cityDir, packA, packB} {
+		mustMkdirAll(t, d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[defaults.rig.imports.gs]
+source = "../pack-a"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "../pack-b"
+`)
+	writeTestFile(t, packA, "pack.toml", `
+[pack]
+name = "pack-a"
+schema = 1
+
+[[agent]]
+name = "alpha"
+scope = "rig"
+`)
+	writeTestFile(t, packB, "pack.toml", `
+[pack]
+name = "pack-b"
+schema = 1
+
+[[agent]]
+name = "beta"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, a := range explicitAgents(cfg.Agents) {
+		found[a.QualifiedName()] = true
+	}
+
+	if !found["proj/gs.beta"] {
+		t.Errorf("rig-declared gs binding should compose pack-b; got: %v", found)
+	}
+	if found["proj/gs.alpha"] {
+		t.Errorf("default gs binding should be shadowed by the rig's own entry; got: %v", found)
+	}
+}
+
+func TestImport_DefaultRigImportsKeepRigRootImplicitInclude(t *testing.T) {
+	// City-level defaults must not disable the schema-2 convention where a
+	// rig root carrying pack.toml is implicitly included when the rig
+	// declares no includes/imports of its own.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	rigDir := filepath.Join(dir, "rig-root")
+	packA := filepath.Join(dir, "pack-a")
+
+	for _, d := range []string{cityDir, rigDir, packA} {
+		mustMkdirAll(t, d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[defaults.rig.imports.pa]
+source = "../pack-a"
+
+[[rigs]]
+name = "proj"
+path = "`+rigDir+`"
+`)
+	writeTestFile(t, rigDir, "pack.toml", `
+[pack]
+name = "rig-root"
+schema = 2
+
+[[agent]]
+name = "rooty"
+scope = "rig"
+`)
+	writeTestFile(t, packA, "pack.toml", `
+[pack]
+name = "pack-a"
+schema = 1
+
+[[agent]]
+name = "alpha"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, a := range explicitAgents(cfg.Agents) {
+		found[a.QualifiedName()] = true
+	}
+
+	if !found["proj/rooty"] {
+		t.Errorf("rig-root implicit include should survive city defaults; got: %v", found)
+	}
+	if !found["proj/pa.alpha"] {
+		t.Errorf("default rig import should compose alongside the rig-root pack; got: %v", found)
+	}
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, p := range paths {
+		if filepath.Clean(p) == filepath.Clean(want) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestImport_RigImportsCoexistWithIncludes(t *testing.T) {
 	// V1 rig includes and V2 rig imports should work together.
 	dir := t.TempDir()

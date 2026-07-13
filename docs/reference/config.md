@@ -570,6 +570,10 @@ OrderOverride modifies a scanned order's scheduling fields and exec env.
 | `trigger` | string |  |  | Trigger overrides the trigger type. |
 | `gate` | string |  |  | Gate is a deprecated alias for Trigger accepted during the gate-&gt;trigger migration. Parsed inputs are normalized to Trigger. |
 | `interval` | string |  |  | Interval overrides the cooldown interval. Go duration string. |
+| `interval_min` | string |  |  | IntervalMin overrides the lower bound for dynamic interval hints. Go duration string. |
+| `interval_max` | string |  |  | IntervalMax overrides the upper bound for dynamic interval hints. Go duration string. |
+| `alert_after` | string |  |  | AlertAfter overrides the doctor warning threshold. Go duration string. |
+| `critical_after` | string |  |  | CriticalAfter overrides the doctor critical threshold. Go duration string. |
 | `schedule` | string |  |  | Schedule overrides the cron expression. |
 | `check` | string |  |  | Check overrides the condition trigger check command. |
 | `on` | string |  |  | On overrides the event trigger event type. |

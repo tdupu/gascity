@@ -92,6 +92,11 @@ type PackRigDefaults struct {
 // BindingName from imports, resolves paths relative to the pack
 // directory, and appends the agents to the city config.
 //
+// City-level [defaults.rig.imports] entries expand for every rig as a
+// base layer under the rig's own import table: a rig-declared binding
+// of the same name wins wholesale. The merge is composition-only —
+// rig.Imports stays as authored on the returned config.
+//
 // Overrides from the rig are applied to the stamped agents (after all
 // packs for the rig are expanded). All expansion happens before
 // validation — downstream sees a flat City struct.
@@ -118,12 +123,32 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 	for i := range cfg.Rigs {
 		rig := &cfg.Rigs[i]
 		cache := &packLoadCache{results: make(map[string]*packLoadResult)}
+
+		// [defaults.rig.imports] is a city-level base layer under every
+		// rig's own import table: each rig composes every default binding,
+		// and a rig-declared binding of the same name wins wholesale. The
+		// merge is composition-only state — rig.Imports stays as authored
+		// so config rewrites never persist the injected defaults.
+		rigImports := rig.Imports
+		if len(cfg.DefaultRigImports) > 0 {
+			merged := make(map[string]Import, len(cfg.DefaultRigImports)+len(rig.Imports))
+			for name, imp := range cfg.DefaultRigImports {
+				merged[name] = imp
+			}
+			for name, imp := range rig.Imports {
+				merged[name] = imp
+			}
+			rigImports = merged
+		}
+
 		topoRefs := rig.Includes
 		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
 			// When a rig has only a path (no explicit includes/imports), treat
 			// the path directory itself as an implicit include if it contains a
 			// pack.toml. This supports the schema-2 convention where a rig root
-			// can carry a pack.toml with agents/ directories.
+			// can carry a pack.toml with agents/ directories. The check keys on
+			// the authored import table: city-level default imports must not
+			// disable the rig-root convention.
 			if p := strings.TrimSpace(rig.Path); p != "" {
 				packPath := p
 				if !filepath.IsAbs(packPath) {
@@ -133,7 +158,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					topoRefs = []string{packPath}
 				}
 			}
-			if len(topoRefs) == 0 {
+			if len(topoRefs) == 0 && len(rigImports) == 0 {
 				continue
 			}
 		}
@@ -257,16 +282,17 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			}
 		}
 
-		// Process rig-level [imports.X] entries (V2).
-		if len(rig.Imports) > 0 {
-			importNames := make([]string, 0, len(rig.Imports))
-			for name := range rig.Imports {
+		// Process rig-level [imports.X] entries (V2), including the
+		// city-level defaults merged above.
+		if len(rigImports) > 0 {
+			importNames := make([]string, 0, len(rigImports))
+			for name := range rigImports {
 				importNames = append(importNames, name)
 			}
 			sort.Strings(importNames)
 
 			for _, bindingName := range importNames {
-				imp := rig.Imports[bindingName]
+				imp := rigImports[bindingName]
 				if !isOSFileSystem(fs) && builtinpacks.IsSource(imp.Source) {
 					continue
 				}
