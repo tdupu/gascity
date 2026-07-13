@@ -591,6 +591,16 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// bdMetaValue JSON-encodes a metadata value so that bd stores it as a string
+// rather than type-inferring it. When passed as the value side of
+// --set-metadata key=<value>, bd receives a JSON string literal (e.g. `"157"`)
+// and stores it as the string 157, regardless of whether the raw value looks
+// like a number, boolean, or other non-string JSON type.
+func bdMetaValue(v string) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
 // fields Gas City cares about; all others are silently ignored.
 type bdIssue struct {
@@ -1066,7 +1076,7 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			args = append(args, "--set-metadata", k+"="+opts.Metadata[k])
+			args = append(args, "--set-metadata", k+"="+bdMetaValue(opts.Metadata[k]))
 		}
 	}
 	for _, l := range opts.Labels {
@@ -1345,7 +1355,7 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			args = append(args, "--set-metadata", k+"="+opts.Metadata[k])
+			args = append(args, "--set-metadata", k+"="+bdMetaValue(opts.Metadata[k]))
 		}
 	}
 	for _, l := range opts.Labels {
@@ -1440,7 +1450,7 @@ func beadSliceContains(items []Bead, id string) bool {
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
 	err := s.runBDTransientWrite("update", "--json", id,
-		"--set-metadata", key+"="+value)
+		"--set-metadata", key+"="+bdMetaValue(value))
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("setting metadata on %q: %w", id, ErrNotFound)
@@ -1464,7 +1474,7 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		args = append(args, "--set-metadata", k+"="+kvs[k])
+		args = append(args, "--set-metadata", k+"="+bdMetaValue(kvs[k]))
 	}
 	err := s.runBDTransientWrite(args...)
 	if err != nil {
@@ -1965,7 +1975,7 @@ func (s *BdStore) setMetadataBatchAll(ids []string, kvs map[string]string) error
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		args = append(args, "--set-metadata", k+"="+kvs[k])
+		args = append(args, "--set-metadata", k+"="+bdMetaValue(kvs[k]))
 	}
 	err := s.runBDTransientWrite(args...)
 	if err == nil {

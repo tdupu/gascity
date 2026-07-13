@@ -53,3 +53,31 @@ func TestDecodeHookClaimBeadsOneBadBeadDoesNotPoisonBatch(t *testing.T) {
 		t.Errorf("metadata[gc.parked] = %q, want %q", got[1].Metadata["gc.parked"], "true")
 	}
 }
+
+// TestDecodeHookClaimBeadsGHIssueIntAndString pins the acceptance test from
+// gs-uje: gh_issue stored as a JSON number (bd type-inference) and as a JSON
+// string must both decode without error and yield the string "10".
+func TestDecodeHookClaimBeadsGHIssueIntAndString(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+	}{
+		{"int", `[{"id":"gs-1","metadata":{"gh_issue":10}}]`},
+		{"string", `[{"id":"gs-1","metadata":{"gh_issue":"10"}}]`},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := decodeHookClaimBeads(tc.output)
+			if err != nil {
+				t.Fatalf("decodeHookClaimBeads(%s) error: %v", tc.name, err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("decoded %d beads, want 1", len(got))
+			}
+			if got[0].Metadata["gh_issue"] != "10" {
+				t.Errorf("metadata[gh_issue] = %q, want %q", got[0].Metadata["gh_issue"], "10")
+			}
+		})
+	}
+}

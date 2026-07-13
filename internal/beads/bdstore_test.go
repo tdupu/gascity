@@ -1000,13 +1000,13 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 			description = ""
 			metadata = map[string]string{}
 			return []byte(`[{"id":"bd-42","title":"before","status":"closed","issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":"","metadata":{}}]`), nil
-		case "update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied":
+		case `update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason="completed during transaction" --set-metadata existing="kept" --set-metadata tx="applied"`:
 			description = "after"
 			metadata["close_reason"] = "completed during transaction"
 			metadata["existing"] = "kept"
 			metadata["tx"] = "applied"
 			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":"after","metadata":{"close_reason":"completed during transaction","existing":"kept","tx":"applied"}}]`), nil
-		case "update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied":
+		case `update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason="completed during transaction" --set-metadata existing="kept" --set-metadata tx="applied"`:
 			closed = true
 			description = "after"
 			metadata["close_reason"] = "completed during transaction"
@@ -1054,11 +1054,11 @@ func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 
 	want := []string{
 		"bd show --json bd-42", // Tx initial Get
-		"bd update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
+		`bd update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason="completed during transaction" --set-metadata existing="kept" --set-metadata tx="applied"`,
 		"bd show --json bd-42", // honesty re-read after update (close's honesty guard)
 		"bd close --force --json --reason completed during transaction bd-42",
 		"bd show --json bd-42", // honesty re-read after close (close's honesty guard)
-		"bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
+		`bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason="completed during transaction" --set-metadata existing="kept" --set-metadata tx="applied"`,
 		"bd show --json bd-42", // Tx final Get
 		"bd show --json bd-42", // final Get after Tx
 	}
@@ -1110,7 +1110,7 @@ func TestBdStoreTxRetriesTransientUpdateApply(t *testing.T) {
 		switch strings.Join(args, " ") {
 		case "show --json bd-42":
 			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
-		case "update --json bd-42 --title before --status open --type task --set-metadata tx=applied":
+		case `update --json bd-42 --title before --status open --type task --set-metadata tx="applied"`:
 			updateCalls++
 			if updateCalls == 1 {
 				return nil, fmt.Errorf("exit status 1: Error updating bd-42: dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction")
@@ -1196,8 +1196,8 @@ func TestBdStoreUpdateAllBatchesIDsAndRetriesTransientWrite(t *testing.T) {
 	want := []string{
 		"update", "--json", "bd-1", "bd-2",
 		"--status", "closed",
-		"--set-metadata", "gc.outcome=skipped",
-		"--set-metadata", "phase=abort",
+		"--set-metadata", `gc.outcome="skipped"`,
+		"--set-metadata", `phase="abort"`,
 	}
 	if len(calls) != 2 {
 		t.Fatalf("calls = %d, want 2 transient retry attempts", len(calls))
@@ -1373,7 +1373,7 @@ func TestBdStoreCloseAllReturnsMetadataWriteFailure(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd update --json bd-abc-123 --set-metadata source=wave1`: {
+		`bd update --json bd-abc-123 --set-metadata source="wave1"`: {
 			err: metadataErr,
 		},
 		`bd close --force --json bd-abc-123`: {
@@ -1402,7 +1402,7 @@ func TestBdStoreCloseAllWritesSharedMetadataInSingleBatch(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd update --json bd-1 bd-2 --set-metadata source=wave1`: {
+		`bd update --json bd-1 bd-2 --set-metadata source="wave1"`: {
 			out: []byte(`[]`),
 		},
 		`bd close --force --json bd-1 bd-2`: {
@@ -3077,7 +3077,7 @@ func TestBdStoreSetMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantArgs := "update --json bd-42 --set-metadata merge_strategy=mr"
+	wantArgs := `update --json bd-42 --set-metadata merge_strategy="mr"`
 	if strings.Join(gotArgs, " ") != wantArgs {
 		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
 	}
@@ -3100,9 +3100,51 @@ func TestBdStoreSetMetadataDisablesAutoCommitForDoltlite(t *testing.T) {
 	if err := s.SetMetadata("bd-42", "merge_strategy", "mr"); err != nil {
 		t.Fatal(err)
 	}
-	wantArgs := "--dolt-auto-commit off update --json bd-42 --set-metadata merge_strategy=mr"
+	wantArgs := `--dolt-auto-commit off update --json bd-42 --set-metadata merge_strategy="mr"`
 	if strings.Join(gotArgs, " ") != wantArgs {
 		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
+	}
+}
+
+// TestBdStoreSetMetadataJSONEncodesValue pins the store-path fix: --set-metadata
+// values are JSON-encoded so that bd stores them as strings regardless of whether
+// the value looks like a number, boolean, or other non-string JSON type.
+// Without this, bd's type-inference would store "157" as JSON number 157,
+// which then poisons gc hook --claim --json decodes for all workers in the pool.
+func TestBdStoreSetMetadataJSONEncodesValue(t *testing.T) {
+	cases := []struct {
+		key, value, wantArg string
+	}{
+		{"fp_rounds", "5", `fp_rounds="5"`},
+		{"delivered", "true", `delivered="true"`},
+		{"gh_issue", "157", `gh_issue="157"`},
+		{"label", "hello world", `label="hello world"`},
+		{"plain", "normal", `plain="normal"`},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.key, func(t *testing.T) {
+			var gotArgs []string
+			runner := func(_, _ string, args ...string) ([]byte, error) {
+				gotArgs = args
+				return nil, nil
+			}
+			s := beads.NewBdStore("/city", runner)
+			if err := s.SetMetadata("bd-x", tc.key, tc.value); err != nil {
+				t.Fatalf("SetMetadata: %v", err)
+			}
+			// Confirm --set-metadata arg carries the JSON-encoded value (with quotes).
+			var found bool
+			for i, arg := range gotArgs {
+				if arg == "--set-metadata" && i+1 < len(gotArgs) && gotArgs[i+1] == tc.wantArg {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("args = %v, want --set-metadata %s", gotArgs, tc.wantArg)
+			}
+		})
 	}
 }
 
