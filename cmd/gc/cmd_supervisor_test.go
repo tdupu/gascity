@@ -4567,7 +4567,10 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	var stderr bytes.Buffer
 	start := time.Now()
 	err := stopManagedCity(mc, cityPath, &stderr)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+	// 2s proves the 20ms timeouts governed the stop while absorbing
+	// process-spawn overhead that pushes slower hosts past a sub-second
+	// bound.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("stopManagedCity took %s, want bounded timeout", elapsed)
 	}
 	if err == nil {
@@ -4672,7 +4675,10 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	var stderr bytes.Buffer
 	start := time.Now()
 	err := stopManagedCity(mc, cityPath, &stderr)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+	// 2s proves the 20ms shutdown timeout governed the stop (not the 3m
+	// startup or 2m drift timeouts) while absorbing process-spawn overhead
+	// that pushes slower hosts past a sub-second bound.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("stopManagedCity took %s, want shutdown-timeout bound", elapsed)
 	}
 	if err == nil {
