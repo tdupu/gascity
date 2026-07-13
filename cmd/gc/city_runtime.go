@@ -150,7 +150,11 @@ const scaleCheckDemandMinInterval = 1 * time.Second
 type runtimeDemandSnapshot struct {
 	createdAt          time.Time
 	sessionFingerprint string
-	result             DesiredStateResult
+	// eventSeq is the latest event sequence number when the snapshot was built.
+	// shouldRefreshDemandSnapshot uses it to skip expensive rebuilds when no
+	// new events have arrived since the last build.
+	eventSeq uint64
+	result   DesiredStateResult
 }
 
 // CityRuntimeParams holds the caller-provided parameters for creating a
@@ -3188,6 +3192,16 @@ func (cr *CityRuntime) loadDemandSnapshot(
 ) runtimeDemandSnapshot {
 	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
 	if cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint) {
+		// Sample the latest event seq before building so any events that arrive
+		// during the (potentially expensive) build are detected next patrol.
+		var snapshotEventSeq uint64
+		if cr.demandSnapshotsEnabled() {
+			if ep := cr.cs.EventProvider(); ep != nil {
+				if seq, err := ep.LatestSeq(); err == nil {
+					snapshotEventSeq = seq
+				}
+			}
+		}
 		result := cr.buildDesiredState(sessionBeads, trace)
 		var openSessionInfos []sessionpkg.Info
 		if sessionBeads != nil {
@@ -3209,6 +3223,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		cr.demandSnapshot = &runtimeDemandSnapshot{
 			createdAt:          time.Now(),
 			sessionFingerprint: sessionFingerprint,
+			eventSeq:           snapshotEventSeq,
 			result:             result,
 		}
 	}
@@ -3236,6 +3251,19 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 	}
 	if cr.demandSnapshot.sessionFingerprint != sessionFingerprint {
 		return true
+	}
+	// When events are available, use the event sequence number as the
+	// invalidation signal: only rebuild if new events have arrived since
+	// the snapshot was taken. This avoids the expensive buildDesiredState
+	// cost on every patrol tick when the bead store has not changed.
+	if cr.demandSnapshotsEnabled() {
+		if ep := cr.cs.EventProvider(); ep != nil {
+			currentSeq, err := ep.LatestSeq()
+			if err == nil {
+				return currentSeq > cr.demandSnapshot.eventSeq
+			}
+		}
+		// LatestSeq unavailable; fall through to the time-based safety net.
 	}
 	maxAge := cr.demandSnapshotPatrolMaxAge()
 	if maxAge <= 0 {

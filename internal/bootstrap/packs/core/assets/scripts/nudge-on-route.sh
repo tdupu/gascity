@@ -92,6 +92,8 @@ PAIRS="$(printf '%s\n' "$EVENTS" \
                     and .payload.bead.metadata."gc.routed_to" != "")
              | [.payload.bead.id, .payload.bead.metadata."gc.routed_to"] | @tsv' 2>/dev/null \
     | sort -u)" || PAIRS=""
+# Cap pairs processed per execution so a large backlog can't hang the order loop.
+PAIRS="$(printf '%s\n' "$PAIRS" | head -n "${GC_NUDGE_MAX_PAIRS:-200}")"
 [ -n "$PAIRS" ] || exit 0
 
 # Load dedup state (object mapping "<bead>|<routed_to>" -> ISO timestamp).

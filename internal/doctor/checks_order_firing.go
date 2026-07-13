@@ -91,7 +91,16 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	firedEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderFired})
+	maxSeq, _ := events.ReadLatestSeq(eventPath)
+	const orderFiredLookback = uint64(500_000)
+	var orderFiredAfterSeq uint64
+	if maxSeq > orderFiredLookback {
+		orderFiredAfterSeq = maxSeq - orderFiredLookback
+	}
+	firedEvents, err := events.ReadFiltered(eventPath, events.Filter{
+		Type:     events.OrderFired,
+		AfterSeq: orderFiredAfterSeq,
+	})
 	if err != nil {
 		result.Status = StatusError
 		result.Message = fmt.Sprintf("read order firing events: %v", err)
@@ -520,7 +529,31 @@ func cronRangeForDoctor(rangePart string, lowerBound, upperBound int) (int, int,
 }
 
 func latestControllerStartedAt(eventPath string) (time.Time, error) {
-	startEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.ControllerStarted})
+	// Fast path: controller start in active file tail (the common case).
+	tailEvents, err := events.ReadFilteredTail(eventPath, events.Filter{Type: events.ControllerStarted}, 5)
+	if err == nil {
+		var latest time.Time
+		for _, e := range tailEvents {
+			if e.Ts.After(latest) {
+				latest = e.Ts
+			}
+		}
+		if !latest.IsZero() {
+			return latest, nil
+		}
+	}
+	// Slow path: start event is in archived history. Use AfterSeq to skip
+	// the bulk of archives and read only the recent ones.
+	maxSeq, seqErr := events.ReadLatestSeq(eventPath)
+	const controllerStartLookback = uint64(100_000)
+	var afterSeq uint64
+	if seqErr == nil && maxSeq > controllerStartLookback {
+		afterSeq = maxSeq - controllerStartLookback
+	}
+	startEvents, err := events.ReadFiltered(eventPath, events.Filter{
+		Type:     events.ControllerStarted,
+		AfterSeq: afterSeq,
+	})
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -566,12 +599,27 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 
 func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
 	name := orderDisplayName(order)
+
+	// Use explicit thresholds when present; fall back to the 1.5×/3× rule.
+	warnThreshold := expected + expected/2
+	critThreshold := expected * 3
+	if order.AlertAfter != "" {
+		if d, err := time.ParseDuration(order.AlertAfter); err == nil && d > 0 {
+			warnThreshold = d
+		}
+	}
+	if order.CriticalAfter != "" {
+		if d, err := time.ParseDuration(order.CriticalAfter); err == nil && d > 0 {
+			critThreshold = d
+		}
+	}
+
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
 			return StatusOK, SeverityBlocking, fmt.Sprintf("%s: never fired (controller start unknown)", name)
 		}
 		uptime := nonNegativeDuration(now.Sub(controllerStarted))
-		if uptime >= expected+expected/2 {
+		if uptime >= warnThreshold {
 			// Advisory only for cron: a cron order that has never fired since
 			// controller start may be the cron-scheduler bug (ga-97qngx), not
 			// a real outage. Cooldown never-fired/stale paths remain blocking
@@ -586,9 +634,9 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 
 	age := nonNegativeDuration(now.Sub(lastFired))
 	switch {
-	case age >= expected*3:
+	case age >= critThreshold:
 		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
-	case age >= expected+expected/2:
+	case age >= warnThreshold:
 		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
 		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))

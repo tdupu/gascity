@@ -17,7 +17,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
@@ -40,7 +42,7 @@ tick and dispatches work when a trigger opens.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history, sweep-tracking, sweep-nudge-mail)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history, sweep-tracking, sweep-nudge-mail, set-interval)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc order: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -55,6 +57,7 @@ tick and dispatches work when a trigger opens.`,
 		newOrderHistoryCmd(stdout, stderr),
 		newOrderSweepTrackingCmd(stdout, stderr),
 		newOrderSweepNudgeMailCmd(stdout, stderr),
+		newOrderSetIntervalCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -291,7 +294,7 @@ func loadAllOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.Ci
 // loadAllOrders scans all configured orders and applies configured overrides.
 // Callers that execute or list active work should use loadActiveOrders instead.
 func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(stderr, cmdName))
+	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(cfg, stderr, cmdName))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
@@ -310,10 +313,10 @@ func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer
 // scanAllOrders returns the shared post-override discovery view used by command
 // tests and compatibility call sites.
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
-	return orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(stderr, cmdName))
+	return orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(cfg, stderr, cmdName))
 }
 
-func orderScanOptions(stderr io.Writer, cmdName string) orderdiscovery.ScanOptions {
+func orderScanOptions(cfg *config.City, stderr io.Writer, cmdName string) orderdiscovery.ScanOptions {
 	return orderdiscovery.ScanOptions{
 		OnRigScanError: func(rigName string, err error) error {
 			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
@@ -323,7 +326,7 @@ func orderScanOptions(stderr io.Writer, cmdName string) orderdiscovery.ScanOptio
 			fmt.Fprintf(stderr, "%s: order %s: %v\n", cmdName, orderName, err) //nolint:errcheck // best-effort stderr
 			return nil
 		},
-		ValidateOrder: validateOrderExecEnvOverrides,
+		ValidateOrder: orderValidators(cfg),
 	}
 }
 
@@ -1086,7 +1089,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
 		}
 		for _, a := range aa {
-			if err := validateOrderCheckPreflight(a); err != nil {
+			if err := validateOrderCheckPreflight(a, cfg); err != nil {
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -1165,7 +1168,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 	}
 	anyDue := false
 	for _, a := range aa {
-		if err := validateOrderCheckPreflight(a); err != nil {
+		if err := validateOrderCheckPreflight(a, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -1236,8 +1239,8 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 	return 1
 }
 
-func validateOrderCheckPreflight(a orders.Order) error {
-	return validateOrderExecEnvOverrides(a)
+func validateOrderCheckPreflight(a orders.Order, cfg *config.City) error {
+	return orderValidators(cfg)(a)
 }
 
 // --- gc order history ---
@@ -1902,5 +1905,62 @@ func cmdOrderSweepNudgeMailRun(store beads.Store, nudgeState *nudgequeue.State, 
 	}
 	fmt.Fprintf(stdout, "nudge-mail-sweep: closed %d nudge bead(s), %d mail bead(s)  %s\n", //nolint:errcheck // best-effort stdout
 		result.NudgeClosed, result.MailClosed, budgetLine)
+	return 0
+}
+
+// --- gc order set-interval ---
+
+func newOrderSetIntervalCmd(stdout, stderr io.Writer) *cobra.Command {
+	var rig string
+	cmd := &cobra.Command{
+		Use:   "set-interval <name> <duration>",
+		Short: "Set the cooldown interval for an order override in city.toml",
+		Long: `Set the [[orders.overrides]] interval field for a named order in city.toml.
+
+Creates or updates an override entry for the named order with the given
+Go duration string as the interval (e.g. 30m, 2h, 24h). This provides a
+policy-compliant alternative to hand-editing city.toml (POLICY.md P1.2).
+
+Use --rig to scope the override to a specific rig's order.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if cmdOrderSetInterval(args[0], args[1], rig, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+		ValidArgsFunction: completeOrderNames,
+	}
+	cmd.Flags().StringVar(&rig, "rig", "", "rig name to scope the override")
+	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
+	return cmd
+}
+
+// cmdOrderSetInterval writes an [[orders.overrides]] interval entry into city.toml.
+func cmdOrderSetInterval(name, interval, rig string, stdout, stderr io.Writer) int {
+	if _, err := time.ParseDuration(interval); err != nil {
+		fmt.Fprintf(stderr, "gc order set-interval: invalid duration %q: %v\n", interval, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order set-interval: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	editor := configedit.NewEditor(fsys.OSFS{}, tomlPath)
+	if err := editor.MergeOrderOverride(config.OrderOverride{
+		Name:     name,
+		Rig:      rig,
+		Interval: &interval,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc order set-interval: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if rig != "" {
+		fmt.Fprintf(stdout, "Order %q (rig %q) interval set to %s\n", name, rig, interval) //nolint:errcheck // best-effort stdout
+	} else {
+		fmt.Fprintf(stdout, "Order %q interval set to %s\n", name, interval) //nolint:errcheck // best-effort stdout
+	}
 	return 0
 }

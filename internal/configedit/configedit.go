@@ -1528,6 +1528,18 @@ func mergeOrderOverride(dst *config.OrderOverride, src config.OrderOverride) {
 	if src.Interval != nil {
 		dst.Interval = src.Interval
 	}
+	if src.IntervalMin != nil {
+		dst.IntervalMin = src.IntervalMin
+	}
+	if src.IntervalMax != nil {
+		dst.IntervalMax = src.IntervalMax
+	}
+	if src.AlertAfter != nil {
+		dst.AlertAfter = src.AlertAfter
+	}
+	if src.CriticalAfter != nil {
+		dst.CriticalAfter = src.CriticalAfter
+	}
 	if src.Schedule != nil {
 		dst.Schedule = src.Schedule
 	}

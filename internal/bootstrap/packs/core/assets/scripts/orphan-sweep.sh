@@ -88,12 +88,39 @@ append_rig_scope() {
 # rows so one stale or unreachable rig does not disable cleanup elsewhere.
 append_hq_scope || exit 0
 
+RIG_BEAD_TMPS=()
+RIG_SESSION_TMPS=()
+RIG_PIDS=()
+
 while IFS= read -r rig; do
     [ -z "$rig" ] && continue
-    if ! append_rig_scope "$rig"; then
-        echo "orphan-sweep: skipping rig $rig after session-list failure" >&2
-    fi
+    rig_bead_tmp=$(mktemp) || continue
+    rig_session_tmp=$(mktemp) || { rm -f "$rig_bead_tmp"; continue; }
+    RIG_BEAD_TMPS+=("$rig_bead_tmp")
+    RIG_SESSION_TMPS+=("$rig_session_tmp")
+    (
+        if ! gc --rig "$rig" session list --json >>"$rig_session_tmp" 2>/dev/null; then
+            echo "orphan-sweep: skipping rig $rig after session-list failure" >&2
+            exit 0
+        fi
+        gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null >>"$rig_bead_tmp" || true
+        gc --rig "$rig" session list --json >>"$rig_session_tmp" 2>/dev/null || true
+    ) &
+    RIG_PIDS+=($!)
 done <<<"$RIG_NAMES"
+
+for pid in "${RIG_PIDS[@]}"; do
+    wait "$pid" || true
+done
+
+for f in "${RIG_BEAD_TMPS[@]}"; do
+    cat "$f" >>"$TMP" 2>/dev/null || true
+    rm -f "$f"
+done
+for f in "${RIG_SESSION_TMPS[@]}"; do
+    cat "$f" >>"$SESSION_TMP" 2>/dev/null || true
+    rm -f "$f"
+done
 
 IN_PROGRESS=$(jq -c -s 'add // []' "$TMP" 2>/dev/null) || IN_PROGRESS="[]"
 if [ "$IN_PROGRESS" = "[]" ]; then

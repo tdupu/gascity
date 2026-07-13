@@ -1981,6 +1981,14 @@ type OrderOverride struct {
 	Gate *string `toml:"gate,omitempty" jsonschema_extras:"deprecated=true"`
 	// Interval overrides the cooldown interval. Go duration string.
 	Interval *string `toml:"interval,omitempty"`
+	// IntervalMin overrides the lower bound for dynamic interval hints. Go duration string.
+	IntervalMin *string `toml:"interval_min,omitempty"`
+	// IntervalMax overrides the upper bound for dynamic interval hints. Go duration string.
+	IntervalMax *string `toml:"interval_max,omitempty"`
+	// AlertAfter overrides the doctor warning threshold. Go duration string.
+	AlertAfter *string `toml:"alert_after,omitempty"`
+	// CriticalAfter overrides the doctor critical threshold. Go duration string.
+	CriticalAfter *string `toml:"critical_after,omitempty"`
 	// Schedule overrides the cron expression.
 	Schedule *string `toml:"schedule,omitempty"`
 	// Check overrides the condition trigger check command.
