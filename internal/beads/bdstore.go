@@ -2137,6 +2137,48 @@ func (s *BdStore) Delete(id string) error {
 	return nil
 }
 
+// bdDeleteBatchChunk bounds how many ids ride on a single `bd delete`
+// invocation so a large closure stays within command-line argument limits.
+const bdDeleteBatchChunk = 256
+
+// DeleteBatch removes exactly the given beads with batched `bd delete … --force`
+// calls. `--force` deletes the listed ids and orphans external dependents — it
+// removes every dependency link touching each deleted bead (any type, both
+// directions) and leaves beads that merely depend on them alive, matching the
+// per-bead Delete path (BdStore.Delete also uses `--force`). It is
+// deliberately NOT `--cascade`, which would recursively delete dependent issues
+// outside the collected closure. --force tolerates ids that are already gone,
+// and ids are chunked to respect command-line limits. DeleteBatch is the
+// batched counterpart to Delete that lets the wisp GC tear down a molecule
+// closure with a handful of subprocesses instead of one per bead and edge. It
+// satisfies BatchDeleter.
+//
+// Each chunk is a separate committed `bd delete` subprocess, so a later chunk
+// can fail after earlier chunks are durably gone. On such a partial failure it
+// returns a *BatchDeleteError carrying the ids from the fully-committed earlier
+// chunks, letting a caching layer reconcile exactly those instead of treating
+// the whole batch as untouched.
+func (s *BdStore) DeleteBatch(ids []string) error {
+	for start := 0; start < len(ids); start += bdDeleteBatchChunk {
+		end := start + bdDeleteBatchChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		args := make([]string, 0, len(chunk)+2)
+		args = append(args, "delete")
+		args = append(args, chunk...)
+		args = append(args, "--force")
+		if err := s.runBDTransientWrite(args...); err != nil {
+			return &BatchDeleteError{
+				Committed: append([]string(nil), ids[:start]...),
+				Err:       fmt.Errorf("batch delete of %d bead(s): %w", len(chunk), err),
+			}
+		}
+	}
+	return nil
+}
+
 // List returns beads matching the query via bd list and bd query.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
@@ -2231,6 +2273,13 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 		return true
 	}
 	if len(serverQuery.Metadata) > 0 || !serverQuery.CreatedBefore.IsZero() || !serverQuery.UpdatedBefore.IsZero() {
+		return true
+	}
+	// bd list exposes no compound (created_at, id) seek flag; the boundary is
+	// resolved Go-side (identical tie-break to the in-memory sort), so a
+	// bd-side limit would cut rows before that filter runs — fetch unbounded
+	// and let applyListQuery filter then limit.
+	if serverQuery.SeekAfter != nil {
 		return true
 	}
 	return false
@@ -2334,10 +2383,15 @@ func isBdQueryUnsupported(err error) bool {
 }
 
 func canApplyWispsServerLimit(query ListQuery) bool {
+	// SeekAfter: the compound (created_at, id) boundary is resolved Go-side
+	// (identical tie-break to the in-memory sort), not via a bd query flag, so
+	// a bd-side limit would cut rows before that filter runs — same class as
+	// CreatedBefore.
 	return (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
-		len(query.Metadata) == 0
+		len(query.Metadata) == 0 &&
+		query.SeekAfter == nil
 }
 
 func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value string) ([]string, bool) {
