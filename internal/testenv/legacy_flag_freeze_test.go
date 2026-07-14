@@ -42,10 +42,11 @@ var legacyFlagNeedles = []string{
 // coupled test files but no ceiling fails loudly.
 var legacyFlagTestFileCeilings = map[string]int{
 	"cmd/gc": 5,
-	// internal/api absorbed a third coupled test file (handler_formulas_test.go)
-	// via a mainline merge that predated this freeze; the ceiling blocks growth
-	// beyond that inherited count.
-	"internal/api":        3,
+	// internal/api absorbed a third and fourth coupled test file
+	// (handler_formulas_test.go, huma_handlers_run_launch_test.go) via
+	// mainline merges that predated this freeze; the ceiling blocks growth
+	// beyond the inherited count.
+	"internal/api":        4,
 	"internal/bootstrap":  1,
 	"internal/dispatch":   4,
 	"internal/formula":    5,

@@ -154,7 +154,9 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// the handler stamps through the apierr catalog. Mutations additionally declare
 	// 403 because the always-installed CSRF middleware (and read-only mode) reject
 	// a mutation with a 403 before the handler runs; reads never emit it.
-	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	// GET /beads also declares 400: an invalid pagination cursor is a typed
+	// invalid-cursor problem response, never a silent page-1 restart.
+	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
@@ -210,7 +212,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/convoys",
 		Summary:       "Create a convoy",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		// 409: a concurrent repeat of the same Idempotency-Key (idempotency-in-flight).
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, (*Server).humaHandleConvoyCreate)
 	cityGet(sm, "/convoy/{id}", (*Server).humaHandleConvoyGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPost(sm, "/convoy/{id}/add", (*Server).humaHandleConvoyAdd, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
@@ -267,6 +270,15 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// Backwards-compatible workflow aliases.
 	cityGet(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowGet, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
 	cityDelete(sm, "/workflow/{workflow_id}", (*Server).humaHandleWorkflowDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
+
+	// Canonical Run resource — the ONE typed run projection, sourced from the
+	// city event log.
+	cityGet(sm, "/runs", (*Server).humaHandleRunsList, errorStatuses(http.StatusServiceUnavailable))
+	cityGet(sm, "/runs/{run_id}", (*Server).humaHandleRunGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/runs/{run_id}/steps", (*Server).humaHandleRunSteps, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/runs/{run_id}/cancel", (*Server).humaHandleRunCancel, func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusAccepted
+	}, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 
 	// Packs.
 	cityGet(sm, "/packs", (*Server).humaHandlePackList, errorStatuses(http.StatusBadRequest, http.StatusNotFound))
@@ -350,6 +362,10 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/session/{id}/rename", (*Server).humaHandleSessionRename, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/agents", (*Server).humaHandleSessionAgentList, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/agents/{agentId}", (*Server).humaHandleSessionAgentGet, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+
+	// Durable session waits (session coordination-class).
+	cityGet(sm, "/waits", (*Server).humaHandleWaitList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/wait/{id}", (*Server).humaHandleWaitGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 
 	// Session SSE stream.
 	registerSSE(sm.humaAPI, huma.Operation{

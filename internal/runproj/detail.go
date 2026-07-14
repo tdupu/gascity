@@ -3,7 +3,6 @@ package runproj
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -231,16 +230,7 @@ func snapshotForRun(beadList []beads.Bead, rootID string, version int, eventSeq 
 	}
 	root := beadList[rootIdx]
 
-	var members []beads.Bead
-	for i := range beadList {
-		b := beadList[i]
-		if b.ID == rootID ||
-			b.ParentID == rootID ||
-			b.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID ||
-			strings.HasPrefix(b.ID, rootID+".") {
-			members = append(members, b)
-		}
-	}
+	members := RunMembers(beadList, rootID)
 
 	snapBeads := make([]runSnapshotBead, 0, len(members))
 	for i := range members {
@@ -647,7 +637,7 @@ func buildFormulaRunProgress(raw runSnapshot, nodes []RunDisplayNode, edges []Ru
 // duplicate; allRunNodeStatuses is the union the taxonomy test enumerates so a
 // newly-added status must be explicitly classified here (or the test fails).
 var (
-	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped"}
+	terminalRunNodeStatuses    = []string{"completed", "done", "failed", "skipped", "canceled"}
 	nonTerminalRunNodeStatuses = []string{"pending", "ready", "running", "active", "blocked"}
 )
 
