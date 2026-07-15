@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -316,15 +317,56 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.readyLocked(nil, q)
+}
+
+// ReadyContext implements ContextReadyReader for the in-memory store. Lock
+// acquisition and the projection scan both observe ctx, so a status request
+// never abandons a goroutine behind a concurrent in-memory writer.
+func (m *MemStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !m.mu.TryLock() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for !m.mu.TryLock() {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-ticker.C:
+			}
+		}
+	}
+	defer m.mu.Unlock()
+	return m.readyLocked(ctx, readyQueryFromArgs(query))
+}
+
+func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error) {
+	contextErr := func() error {
+		if ctx == nil {
+			return nil
+		}
+		return ctx.Err()
+	}
 
 	statusByID := make(map[string]string, len(m.beads))
 	for _, bead := range m.beads {
+		if err := contextErr(); err != nil {
+			return nil, err
+		}
 		statusByID[bead.ID] = bead.Status
 	}
 
 	var result []Bead
 	now := time.Now().UTC()
 	for _, b := range m.beads {
+		if err := contextErr(); err != nil {
+			return nil, err
+		}
 		if !IsReadyCandidateForTier(b, now, q.TierMode) {
 			continue
 		}
@@ -333,6 +375,9 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		}
 		blocked := false
 		for _, dep := range m.deps {
+			if err := contextErr(); err != nil {
+				return nil, err
+			}
 			if dep.IssueID != b.ID {
 				continue
 			}
