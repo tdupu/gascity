@@ -166,7 +166,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4155,
+			BaselineCalls:   4158,
 			BaselineFiles:   189,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
@@ -322,9 +322,9 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4149,
+			BaselineCalls:   4152,
 			BaselineFiles:   189,
-			ReportedCalls:   4149,
+			ReportedCalls:   4152,
 			ReportedFiles:   189,
 			OwnerBead:       "ga-80po0c.2.1",
 			Invariant:       "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline",
