@@ -861,10 +861,18 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				}
 			}
 
-			allRigAgentsFromCityImports = append(allRigAgentsFromCityImports,
-				expandCityImportedAgentsForRigs(agents, cfg.Rigs, bindingName)...)
-			allRigNamedSessionsFromCityImports = append(allRigNamedSessionsFromCityImports,
-				expandCityImportedNamedSessionsForRigs(namedSessions, cfg.Rigs, bindingName)...)
+			// A binding also present in [defaults.rig.imports] is fanned out to
+			// every rig by the composition-only defaults merge in expandPacks,
+			// which cannot see this authored-table exclusion. Skip the
+			// city-import fan-out for such bindings so the binding composes into
+			// a rig at most once — precedence rig-authored > city defaults >
+			// city-import fan-out (gs-lmf).
+			if _, coveredByDefaults := cfg.DefaultRigImports[bindingName]; !coveredByDefaults {
+				allRigAgentsFromCityImports = append(allRigAgentsFromCityImports,
+					expandCityImportedAgentsForRigs(agents, cfg.Rigs, bindingName)...)
+				allRigNamedSessionsFromCityImports = append(allRigNamedSessionsFromCityImports,
+					expandCityImportedNamedSessionsForRigs(namedSessions, cfg.Rigs, bindingName)...)
+			}
 
 			allRequires = append(allRequires, reqs...)
 			allGlobals = append(allGlobals, globals...)

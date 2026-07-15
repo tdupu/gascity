@@ -1845,6 +1845,115 @@ scope = "rig"
 	}
 }
 
+func TestImport_CityImportFanOutSkipsDefaultsCoveredBinding(t *testing.T) {
+	// A binding declared in BOTH city-level [imports.X] and
+	// [defaults.rig.imports.X] must compose into each rig at most once: the
+	// per-rig city-import fan-out has to yield to the defaults-merge path so
+	// the two features do not both stamp <rig>/X.<agent> (gs-lmf). A rig that
+	// authors X itself is already excluded by rigDeclaresImportBinding; a rig
+	// that authors nothing must still get exactly one instance via the
+	// defaults merge, and city-scoped content must be unaffected.
+	//
+	// run composes a city whose X pack has one rig-scoped and one city-scoped
+	// agent, with X in city [imports.X] and rig bbb authoring its own X. The
+	// withDefaults flag toggles [defaults.rig.imports.X]: on it, the defaults
+	// path owns the fan-out; off it, the control run proves the city-import
+	// fan-out still reaches non-authoring rigs.
+	run := func(t *testing.T, withDefaults bool) map[string]int {
+		dir := t.TempDir()
+		cityDir := filepath.Join(dir, "city")
+		importDir := filepath.Join(dir, "xpack")
+		authoredDir := filepath.Join(dir, "xpack-b")
+		for _, d := range []string{cityDir, importDir, authoredDir} {
+			mustMkdirAll(t, d, 0o755)
+		}
+
+		defaults := ""
+		if withDefaults {
+			defaults = `
+[defaults.rig.imports.x]
+source = "../xpack"
+`
+		}
+		writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.x]
+source = "../xpack"
+`+defaults+`
+[[rigs]]
+name = "aaa"
+path = "/tmp/aaa"
+
+[[rigs]]
+name = "bbb"
+path = "/tmp/bbb"
+
+[rigs.imports.x]
+source = "../xpack-b"
+`)
+		writeTestFile(t, importDir, "pack.toml", `
+[pack]
+name = "xpack"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+		writeTestFile(t, authoredDir, "pack.toml", `
+[pack]
+name = "xpack-b"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+`)
+
+		cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+		if err != nil {
+			t.Fatalf("LoadWithIncludes: %v", err)
+		}
+		counts := map[string]int{}
+		for _, a := range explicitAgents(cfg.Agents) {
+			counts[a.QualifiedName()]++
+		}
+		return counts
+	}
+
+	t.Run("defaults cover the binding", func(t *testing.T) {
+		counts := run(t, true)
+		// Rig aaa authors nothing: exactly one worker via the defaults merge,
+		// not one from defaults plus one from the city-import fan-out.
+		if got := counts["aaa/x.worker"]; got != 1 {
+			t.Errorf("aaa/x.worker count = %d, want 1 (defaults must suppress the city-import fan-out)", got)
+		}
+		// Rig bbb authors x itself: exactly one worker from its own binding.
+		if got := counts["bbb/x.worker"]; got != 1 {
+			t.Errorf("bbb/x.worker count = %d, want 1 (rig-authored binding)", got)
+		}
+		// City-scoped content is unchanged by the fan-out guard.
+		if got := counts["x.mayor"]; got != 1 {
+			t.Errorf("x.mayor count = %d, want 1 (city scope preserved)", got)
+		}
+	})
+
+	t.Run("defaults absent keeps the fan-out alive", func(t *testing.T) {
+		counts := run(t, false)
+		// Control: with no defaults entry, the city-import fan-out is the only
+		// path to non-authoring rigs and must still compose the agent.
+		if got := counts["aaa/x.worker"]; got != 1 {
+			t.Errorf("aaa/x.worker count = %d, want 1 (fan-out must stay alive for non-defaults bindings)", got)
+		}
+	})
+}
+
 func containsPath(paths []string, want string) bool {
 	for _, p := range paths {
 		if filepath.Clean(p) == filepath.Clean(want) {
