@@ -20,22 +20,21 @@ import (
 // lifetimes or block shutdown on a slow downstream.
 const extmsgNotifyTimeout = 30 * time.Second
 
-// backgroundCtx returns a context that is explicitly detached from the
-// request but has a bounded timeout. Use for fire-and-forget work
-// (extmsg member notification, log-write fanouts) so goroutines cannot
-// outlive reasonable bounds. When the server gains a shutdown ctx in
-// the future, derive from that instead.
-//
-// The returned cancel is intentionally captured inside a goroutine that
-// exits on ctx.Done(), so go vet's lostcancel check stays happy while
-// the timeout still prevents unbounded accumulation.
-func (s *Server) backgroundCtx() context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), extmsgNotifyTimeout)
+// runBackground owns one detached, bounded task. The task is visible to
+// waitForBackground so tests and a future server shutdown path can wait for
+// side effects before releasing the state they use.
+func (s *Server) runBackground(run func(context.Context)) {
+	s.backgroundTasks.Add(1)
 	go func() {
-		<-ctx.Done()
-		cancel()
+		defer s.backgroundTasks.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), extmsgNotifyTimeout)
+		defer cancel()
+		run(ctx)
 	}()
-	return ctx
+}
+
+func (s *Server) waitForBackground() {
+	s.backgroundTasks.Wait()
 }
 
 // Server is the per-city handler-host. It owns the per-city State and
@@ -54,12 +53,20 @@ type Server struct {
 	mux      *http.ServeMux
 	readOnly bool // mirrors supervisor's read-only flag for /svc/ enforcement
 
+	backgroundTasks sync.WaitGroup
+
 	// sessionLogSearchPaths overrides the default search paths for Claude
 	// session JSONL files. Nil means use worker.DefaultSearchPaths().
 	sessionLogSearchPaths []string
 
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
+
+	// rigIdem is the in-process live index + request_id state machine backing
+	// async server-side rig-create (POST /v0/city/{n}/rigs with a git_url). It
+	// starts empty at boot and is authoritative for admission (G13). One index
+	// per per-city Server (the supervisor caches one Server per city).
+	rigIdem *rigIdemIndex
 
 	// lookPathCache caches exec.LookPath results with a short TTL to avoid
 	// repeated filesystem scans on every GET /v0/agents request.
@@ -233,6 +240,7 @@ func newServer(state State, readOnly bool) *Server {
 		mux:            mux,
 		readOnly:       readOnly,
 		idem:           newIdempotencyCache(30 * time.Minute),
+		rigIdem:        newRigIdemIndex(),
 		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
 		webhookLimiter: newWebhookRateLimiter(),
 	}
