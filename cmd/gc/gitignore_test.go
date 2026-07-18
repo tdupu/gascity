@@ -56,6 +56,23 @@ func TestEnsureGitignoreEntries_RigEntriesKeepBeadsRuntimeIgnored(t *testing.T) 
 	}
 }
 
+// TestEnsureGitignoreEntries_RigIgnoresRepoDotGit locks the fix for the
+// hecke-class incident: gc rig add must write .repo.git/ into the rig
+// .gitignore so the bare-clone pointer directory is never accidentally staged.
+func TestEnsureGitignoreEntries_RigIgnoresRepoDotGit(t *testing.T) {
+	f := fsys.NewFake()
+	f.Dirs["/rig"] = true
+
+	if err := ensureGitignoreEntries(f, "/rig", rigGitignoreEntries); err != nil {
+		t.Fatalf("ensureGitignoreEntries: %v", err)
+	}
+
+	got := string(f.Files[filepath.Join("/rig", ".gitignore")])
+	if !strings.Contains(got, ".repo.git/") {
+		t.Errorf("rig .gitignore missing %q (required to prevent hecke-class incident); got:\n%s", ".repo.git/", got)
+	}
+}
+
 func TestEnsureGitignoreEntries_BeadsRuntimeFilesSurviveGitClean(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git binary not available")
