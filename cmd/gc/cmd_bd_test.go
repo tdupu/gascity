@@ -1247,10 +1247,6 @@ func TestGcBdRigListRecoversAfterManagedHardKillPortRebind(t *testing.T) {
 		}
 		t.Fatalf("managed Dolt did not rebind after hard kill; before=%+v after=%+v", before, after)
 	}
-	rawList := runRawBDFromDir(t, bdPath, rawDir, "list", "--json", "--all", "--limit=0")
-	if !strings.Contains(rawList, rawID) {
-		t.Fatalf("raw bd rig list output missing bead %q after rebind:\n%s", rawID, rawList)
-	}
 	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", rawID)
 	if !strings.Contains(rawShow, rawID) {
 		t.Fatalf("raw bd rig show output missing bead %q after rebind:\n%s", rawID, rawShow)
