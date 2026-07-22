@@ -29,7 +29,7 @@ func TestNormalizeInitTemplateDefaultUsesGascity(t *testing.T) {
 }
 
 func TestInitWizardConfigProviderFlagDefaultsToGascity(t *testing.T) {
-	wiz, err := initWizardConfig("codex", "")
+	wiz, err := initWizardConfig("codex", "", false)
 	if err != nil {
 		t.Fatalf("initWizardConfig: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestDoInitGascityTemplateSeedsRolesDefaultRigImport(t *testing.T) {
 // accepted it but both strings omitted it, making it undiscoverable from the
 // command contract.
 func TestInitTemplateHelpAndErrorAdvertiseAcceptedTemplates(t *testing.T) {
-	accepted := []string{"minimal", "gastown", "gascity", "custom"}
+	accepted := []string{"minimal", "gastown", "gascity", "custom", "empty"}
 
 	// Every advertised template round-trips through the normalizer.
 	for _, tmpl := range accepted {

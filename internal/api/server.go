@@ -9,10 +9,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/featureflags"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/webhookverify"
+	"golang.org/x/sync/singleflight"
 )
 
 // extmsgNotifyTimeout bounds fire-and-forget goroutines spawned from
@@ -53,6 +54,14 @@ type Server struct {
 	mux      *http.ServeMux
 	readOnly bool // mirrors supervisor's read-only flag for /svc/ enforcement
 
+	// bootFlags is the rollout-gate snapshot latched at Server construction —
+	// from the State's boot latch when it implements RolloutFlagsProvider, else
+	// resolved once from Config(). Immutable for the Server lifetime, mirroring
+	// readOnly; the S2+/S3 handler consumers read it.
+	bootFlags rollout.Flags
+
+	runCensusSource RunCensusSource
+
 	backgroundTasks sync.WaitGroup
 
 	// sessionLogSearchPaths overrides the default search paths for Claude
@@ -90,7 +99,8 @@ type Server struct {
 	storeHealthMu       sync.Mutex
 	storeHealthEntry    *StatusStoreHealth
 	storeHealthExpires  time.Time
-	storeHealthComputer func(ctx context.Context) *StatusStoreHealth
+	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
+	storeHealthFlight   singleflight.Group
 
 	// componentVersions caches the dolt engine and bd CLI versions the
 	// supervisor drives for /v0/status. Binary versions are immutable for
@@ -244,6 +254,17 @@ func newServer(state State, readOnly bool) *Server {
 		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
 		webhookLimiter: newWebhookRateLimiter(),
 	}
+	// Latch the rollout snapshot once: prefer the State's boot latch (the
+	// production controllerState); fall back to resolving from Config() for
+	// States without it (test fakes). A Resolve error leaves the zero Flags —
+	// the documented degraded-safe legacy value; the production root already
+	// surfaced the error at boot, and this fallback only runs for provider-less
+	// States, so the error is intentionally not re-surfaced here.
+	if p, ok := state.(RolloutFlagsProvider); ok {
+		s.bootFlags = p.RolloutFlags()
+	} else if cfg := state.Config(); cfg != nil {
+		s.bootFlags, _ = rollout.Resolve(cfg, rollout.ResolveOptions{})
+	}
 	mux.HandleFunc("/svc/", s.handleServiceProxy)
 	// /hook/* webhook receiver — the fourth sanctioned non-Huma surface. Like
 	// /svc/* it is a raw-body pass-through (HMAC/ed25519 sign the exact bytes),
@@ -257,13 +278,7 @@ func newServer(state State, readOnly bool) *Server {
 // feature flags based on the city's daemon config. Called from New
 // and NewReadOnly so both modes observe the same flag state.
 func syncFeatureFlags(cfg *config.City) {
-	enabled := cfg != nil && cfg.Daemon.FormulaV2Enabled()
-	if formula.IsFormulaV2Enabled() != enabled {
-		formula.SetFormulaV2Enabled(enabled)
-	}
-	if molecule.IsGraphApplyEnabled() != enabled {
-		molecule.SetGraphApplyEnabled(enabled)
-	}
+	featureflags.Apply(featureflags.FromConfig(cfg))
 }
 
 type singleStateResolver struct {

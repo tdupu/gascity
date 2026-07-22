@@ -32,6 +32,7 @@ type Override struct {
 	On            *string
 	Pool          *string
 	Timeout       *string
+	CheckTimeout  *string
 	Idempotent    *bool
 	Env           map[string]string
 }
@@ -167,6 +168,9 @@ func applyOverride(a *Order, ov *Override) {
 	}
 	if ov.Timeout != nil {
 		a.Timeout = *ov.Timeout
+	}
+	if ov.CheckTimeout != nil {
+		a.CheckTimeout = *ov.CheckTimeout
 	}
 	if ov.Idempotent != nil {
 		a.Idempotent = *ov.Idempotent

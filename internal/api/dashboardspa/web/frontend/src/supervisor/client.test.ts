@@ -173,7 +173,7 @@ describe('supervisor client wrapper', () => {
   it('calls city-scoped usage and canonical runs through the generated SDK', async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestedUrl(input);
-      if (url.endsWith('/usage')) {
+      if (new URL(url).pathname.endsWith('/usage')) {
         return new Response(
           JSON.stringify({
             available: true,
@@ -189,7 +189,6 @@ describe('supervisor client wrapper', () => {
       }
       return new Response(
         JSON.stringify({
-          runs: [{ run_id: 'run-1', title: 'Run one', status: 'active', scope: {} }],
           status_counts: {
             pending: 0,
             active: 1,
@@ -213,12 +212,12 @@ describe('supervisor client wrapper', () => {
       available: true,
       today: { invocations: 4 },
     });
-    await expect(api.listRuns('test-city')).resolves.toMatchObject({
+    await expect(api.runCensus('test-city')).resolves.toMatchObject({
       status_counts: { active: 1 },
     });
     expect(fetchSpy.mock.calls.map((call) => requestedUrl(call[0]))).toEqual([
-      'http://gc-supervisor.test/v0/city/test-city/usage',
-      'http://gc-supervisor.test/v0/city/test-city/runs',
+      'http://gc-supervisor.test/v0/city/test-city/usage?aggregate_only=true',
+      'http://gc-supervisor.test/v0/city/test-city/runs/census',
     ]);
   });
 
@@ -260,8 +259,48 @@ describe('supervisor client wrapper', () => {
       total: 1,
     });
     expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/sessions',
+      'http://gc-supervisor.test/v0/city/test-city/sessions?limit=1000',
     );
+  });
+
+  it('walks session pages via next_cursor and merges them', async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      // Second page: the client carries the first page's next_cursor forward.
+      if (requestedUrl(input).includes('cursor=page2')) {
+        return new Response(
+          JSON.stringify({
+            items: [{ id: 'gc-session-2', session_name: 'polecat' }],
+            total: 2,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      // First page: mint a next_cursor so the client keeps walking instead of
+      // truncating at one server-cap page.
+      return new Response(
+        JSON.stringify({
+          items: [{ id: 'gc-session-1', session_name: 'mayor' }],
+          next_cursor: 'page2',
+          total: 2,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.listSessions('test-city')).resolves.toMatchObject({
+      items: [{ id: 'gc-session-1' }, { id: 'gc-session-2' }],
+      total: 2,
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const urls = fetchSpy.mock.calls.map((call) => requestedUrl(call[0]));
+    expect(urls[0]).toBe('http://gc-supervisor.test/v0/city/test-city/sessions?limit=1000');
+    expect(urls[1]).toContain('limit=1000');
+    expect(urls[1]).toContain('cursor=page2');
   });
 
   it('calls supervisor session pending interaction through the generated SDK', async () => {
@@ -880,6 +919,9 @@ describe('supervisor client wrapper', () => {
     expect(streamApi.sessionStreamUrl('test-city', 'gc-session-1')).toBe(
       'http://gc-supervisor.test/v0/city/test-city/session/gc-session-1/stream',
     );
+    expect(api.sessionStreamUrl('test-city', 'gc-session-1', 'st1.snapshot', 'structured')).toBe(
+      'http://gc-supervisor.test/v0/city/test-city/session/gc-session-1/stream?after_cursor=st1.snapshot&format=structured',
+    );
   });
 
   it('calls supervisor session transcripts through the generated SDK', async () => {
@@ -1182,7 +1224,7 @@ describe('supervisor client wrapper', () => {
       cityHealth: vi.fn(),
       cityStatus: vi.fn(),
       cityUsage: vi.fn(),
-      listRuns: vi.fn(),
+      runCensus: vi.fn(),
       health: vi.fn(),
       listAgents: vi.fn(),
       listRigs: vi.fn(),

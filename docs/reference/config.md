@@ -284,6 +284,8 @@ BeadsConfig holds bead store settings.
 | `backend` | string |  |  | Backend selects the bd storage engine when Provider is "bd". Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores. |
 | `event_hooks` | boolean |  | `true` | EventHooks controls installation of the bead event-forwarding hooks (.beads/hooks/on_create,on_update,on_close) that shell out to `gc event emit` on every bead write. Defaults to true. Set to false once the controller's native cache-events already observe bead changes (the bd_hooks doctor gate): the lifecycle then removes the event hooks (leaving git hooks untouched) and stops reinstalling them, clearing the per-write churn and the native-store gate. |
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids bd ready/list flags that are unavailable or incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
+| `conditional_writes` | string |  |  | ConditionalWrites selects the bead-write discipline: "off" (legacy, byte-identical), "auto" (compare-and-swap where the store is capable, loud degrade otherwise), or "require" (CAS or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
+| `guarded_release` | string |  |  | GuardedRelease selects the ownership-release discipline for work beads: "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded release verbs where the bd binary is capable, loud degrade otherwise), or "require" (guarded release or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
 
 ## ChatSessionsConfig
@@ -580,6 +582,7 @@ OrderOverride modifies a scanned order's scheduling fields and exec env.
 | `on` | string |  |  | On overrides the event trigger event type. |
 | `pool` | string |  |  | Pool overrides the target session config. |
 | `timeout` | string |  |  | Timeout overrides the per-order timeout. Go duration string. |
+| `check_timeout` | string |  |  | CheckTimeout overrides the condition trigger's check-command deadline. Go duration string. Lets a deployment tune check_timeout for a scanned shared-pack order (e.g. a slow-store queue check) without editing the pack source. |
 | `idempotent` | boolean |  |  | Idempotent overrides whether the order's dispatch is safe to repeat. Idempotent orders fail open when the open-work gate times out (#2893). |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables exported into an exec order's child process. |
 
@@ -590,7 +593,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
-| `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on per-order timeouts. No order gets more than this duration. Go duration string (e.g., "60s"). Empty means uncapped (no override). |
+| `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults
@@ -799,6 +802,7 @@ SessionConfig holds session provider settings.
 | `setup_timeout` | string |  | `10s` | SetupTimeout is the per-command/script timeout for session setup and pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s". |
 | `nudge_ready_timeout` | string |  | `10s` | NudgeReadyTimeout is how long to wait for the agent to be ready before sending nudge text. Duration string. Defaults to "10s". |
 | `nudge_retry_interval` | string |  | `500ms` | NudgeRetryInterval is the retry interval between nudge readiness polls. Duration string. Defaults to "500ms". |
+| `nudge_poll_interval` | string |  | `2s` | NudgePollInterval is the cycle interval for the per-session nudge poller sidecar (`gc nudge poll`). Each cycle observes the session and checks the queued-nudge state, so on hosts running many sessions a longer interval trades nudge-delivery latency for less standing load. Duration string. Unset means the poller's built-in default (2s). |
 | `nudge_lock_timeout` | string |  | `30s` | NudgeLockTimeout is how long to wait to acquire the per-session nudge lock. Duration string. Defaults to "30s". |
 | `debounce_ms` | integer |  | `500` | DebounceMs is the default debounce interval in milliseconds for send-keys. Defaults to 500. |
 | `display_ms` | integer |  | `5000` | DisplayMs is the default display duration in milliseconds for status messages. Defaults to 5000. |
@@ -968,6 +972,7 @@ Workspace holds city-level metadata and optional defaults that apply to all agen
 | `name` | string |  |  | Name is the legacy checked-in city name. Runtime identity now resolves from site binding (.gc/site.toml workspace_name), declared config, and basename precedence instead; gc init writes the machine-local name to site.toml and omits it from city.toml. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived HQ bead ID prefix. When empty, the prefix is derived from the city Name via DeriveBeadsPrefix. |
 | `provider` | string |  |  | Provider is the default provider name used by agents that don't specify one. |
+| `timezone` | string |  |  | Timezone is the city-default IANA time zone (e.g. "America/New_York") in which cron order schedules are evaluated when an order does not set its own tz. Empty means the controller's process-local zone. Invalid names fail order discovery loudly rather than falling back silently. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for all agents. |
 | `suspended` | boolean |  |  | Suspended is the deprecated pre-runtime-state city suspension flag. Parsed for backwards compatibility and treated as an alias for SuspendedOnStart by [Workspace.EffectiveSuspendedOnStart], so existing cities with `suspended = true` continue to start suspended after upgrade. Live suspend/resume commands no longer write this field. `gc doctor` flags it and offers `--fix` to rename to suspended_on_start. |
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart is the city's desired suspension state at start. When true and no explicit entry exists in .gc/runtime/suspension-state.json, the city is treated as suspended. Once the user has explicitly suspended or resumed via `gc suspend/resume`, the runtime state wins. |

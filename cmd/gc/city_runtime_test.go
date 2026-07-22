@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -431,7 +432,7 @@ func stubManagedDoltStoreOpeners(t *testing.T) {
 	t.Helper()
 	prevCityStore := newControllerStateOpenCityStore
 	prevSweepStore := newCityRuntimeOpenSweepStore
-	newControllerStateOpenCityStore = func(string) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
 	}
 	newCityRuntimeOpenSweepStore = func(string, string) (beads.Store, error) {
@@ -3755,9 +3756,7 @@ func TestCityRuntimeTickRunsOnDeathWithCanonicalRigEnv(t *testing.T) {
 		},
 	}
 
-	dirty := &atomic.Bool{}
-	var lastProviderName string
-	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test")
+	cr.reconcilePoolDeaths(&prevPoolRunning)
 
 	data, err := os.ReadFile(outFile)
 	if err != nil {
@@ -3801,9 +3800,7 @@ func TestCityRuntimeTickSkipsOnDeathWhenSessionListingIsPartial(t *testing.T) {
 		},
 	}
 
-	dirty := &atomic.Bool{}
-	var lastProviderName string
-	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test")
+	cr.reconcilePoolDeaths(&prevPoolRunning)
 
 	if _, err := os.Stat(outFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("on_death output err = %v, want no hook execution", err)
