@@ -1,0 +1,18 @@
+
+# Upstream (gastownhall) test-fixture UUIDs mis-flagged as generic-api-key by
+# the fork pre-push hook scanning the full merge range. Confirmed false positives
+# (sessionKey/decoyKey/attemptToken UUIDs + RFC example UUIDs), already public
+# upstream, none in local commits. Added 2026-07-21 during origin merge (ea25d87).
+5edb0ff205563e10ab92c4edf0368e96c61d8103:examples/bd/dolt/health_test.go:generic-api-key:1165
+a53443ffb65ea333fe9e1bef850d8d98a8e36aaa:cmd/gc/usage_compute_test.go:generic-api-key:339
+a53443ffb65ea333fe9e1bef850d8d98a8e36aaa:cmd/gc/usage_compute_test.go:generic-api-key:456
+a53443ffb65ea333fe9e1bef850d8d98a8e36aaa:internal/worker/invocation_telemetry_usagefact_test.go:generic-api-key:471
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/api/handler_sessions_test.go:generic-api-key:1010
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/api/handler_sessions_test.go:generic-api-key:1011
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/session/transcript_lookup_test.go:generic-api-key:128
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/session/transcript_lookup_test.go:generic-api-key:148
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/session/transcript_lookup_test.go:generic-api-key:75
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/session/transcript_lookup_test.go:generic-api-key:76
+bdd910642465261558addc963fd827e3d1ad1eff:engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md:generic-api-key:932
+c8fcd83f0e2e74fe0655dd9fcabc2f45b7dc83a1:cmd/gc/productmetrics_private_process_test.go:generic-api-key:173
+c8fcd83f0e2e74fe0655dd9fcabc2f45b7dc83a1:cmd/gc/productmetrics_private_process_test.go:generic-api-key:95
