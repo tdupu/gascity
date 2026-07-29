@@ -298,8 +298,12 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 	if a, ok := findAgentByQualified(cfg, input); ok {
 		return a, true
 	}
-	// Step 2b: qualified pool instance — "rig/polecat-2" matches pool "rig/polecat".
-	if strings.Contains(input, "/") {
+	// Step 2b: qualified pool instance — "rig/polecat-2" (slash-qualified) or
+	// "mathcity.brief-operator-1" (binding-qualified, city-scoped) matches the
+	// corresponding pool template. Mirrors the shared resolver helper
+	// (internal/agentutil/resolve.go), which gates on ContainsAny(input, "/.")
+	// so dot-qualified instances resolve too (gt-gf0tk).
+	if strings.ContainsAny(input, "/.") {
 		if a, ok := resolvePoolInstance(cfg, input); ok {
 			return a, true
 		}

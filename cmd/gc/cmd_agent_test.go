@@ -364,6 +364,28 @@ func TestResolveAgentIdentityRejectsCanonicalSingletonPoolSuffix(t *testing.T) {
 	}
 }
 
+// TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance is a regression
+// for gt-gf0tk: a binding-qualified, city-scoped pool instance like
+// "mathcity.brief-operator-1" must resolve to its "mathcity.brief-operator"
+// pool. The CLI-local resolveAgentIdentity gated its Step 2b pool-instance
+// check on strings.Contains(input, "/"), so the dot-qualified form was never
+// routed to resolvePoolInstance — even though the shared resolver helper
+// (internal/agentutil/resolve.go) already handles it via ContainsAny(input, "/.").
+func TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "brief-operator", BindingName: "mathcity", Dir: "", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(12)},
+		},
+	}
+	a, ok := resolveAgentIdentity(cfg, "mathcity.brief-operator-1", "")
+	if !ok {
+		t.Fatalf("resolveAgentIdentity(mathcity.brief-operator-1) = (_, false), want the brief-operator pool instance")
+	}
+	if a.Name != "brief-operator-1" {
+		t.Fatalf("resolveAgentIdentity(mathcity.brief-operator-1) resolved Name = %q, want %q", a.Name, "brief-operator-1")
+	}
+}
+
 func TestResolveAgentIdentityUsesRigContextForScopeUnqualifiedControlDispatcher(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
