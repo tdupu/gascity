@@ -946,6 +946,7 @@ type AgentOutputResponse struct {
 type AgentPatch struct {
 	AppendFragments         *[]string         `json:"AppendFragments"`
 	Args                    *[]string         `json:"Args"`
+	AssignedWorkDeferLimit  *int64            `json:"AssignedWorkDeferLimit"`
 	Attach                  *bool             `json:"Attach"`
 	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
 	DependsOn               *[]string         `json:"DependsOn"`
@@ -7618,7 +7619,8 @@ type UnboundEventPayload struct {
 // UsageBody defines model for UsageBody.
 type UsageBody struct {
 	// Available True when this city is configured to record local usage estimates.
-	Available bool `json:"available"`
+	Available bool         `json:"available"`
+	Last24h   *UsageTotals `json:"last_24h,omitempty"`
 
 	// ObservedFrom RFC3339 timestamp of the oldest fact included in this bounded read.
 	ObservedFrom *string `json:"observed_from,omitempty"`

@@ -1024,6 +1024,7 @@ export const zPoolOverride = z.object({
 export const zAgentPatch = z.object({
     AppendFragments: z.array(z.string()).nullable(),
     Args: z.array(z.string()).nullable(),
+    AssignedWorkDeferLimit: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable(),
     Attach: z.boolean().nullable(),
     DefaultSlingFormula: z.string().nullable(),
     DependsOn: z.array(z.string()).nullable(),
@@ -3107,6 +3108,7 @@ export const zUsageTotals = z.object({
 
 export const zUsageBody = z.object({
     available: z.boolean(),
+    last_24h: zUsageTotals.optional(),
     observed_from: z.string().optional(),
     partial: z.boolean().optional(),
     partial_reasons: z.array(z.string()).nullish(),

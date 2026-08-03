@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 197,
+  "next_id": 198,
   "permanent_ids": [
     {
       "name": "help",
@@ -2657,7 +2657,7 @@
       "notice_policy": "eligible",
       "classification": "order-set-interval",
       "owner": "immediate",
-      "id": 196
+      "id": 197
     },
     {
       "path": "gc order show",
@@ -2855,6 +2855,21 @@
       "classification": "pack-registry-remove",
       "owner": "immediate",
       "id": 106
+    },
+    {
+      "path": "gc pack registry requests",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "pack-registry-requests",
+      "owner": "immediate",
+      "id": 196
     },
     {
       "path": "gc pack registry search",

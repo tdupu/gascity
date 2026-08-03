@@ -60,6 +60,7 @@ export type AgentOutputResponse = {
 export type AgentPatch = {
     AppendFragments: Array<string> | null;
     Args: Array<string> | null;
+    AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
@@ -8168,6 +8169,10 @@ export type UsageBody = {
      * True when this city is configured to record local usage estimates.
      */
     available: boolean;
+    /**
+     * Usage over the trailing 24 hours; a rolling window that survives the local-midnight reset of today. Omitted by servers or proxies that predate the field.
+     */
+    last_24h?: UsageTotals;
     /**
      * RFC3339 timestamp of the oldest fact included in this bounded read.
      */

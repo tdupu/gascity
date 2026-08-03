@@ -174,7 +174,7 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 		NoConvoy: opts.NoConvoy,
 	})
 	if check.Idempotent {
-		needsAttach, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
+		decision, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
 		switch {
 		case probeErr != nil:
 			// The attachment probe failed, so we cannot prove the routed bead
@@ -184,11 +184,21 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
 				"could not verify molecule attachment for %s; treating --on as an idempotent no-op: %v",
 				opts.BeadOrFormula, probeErr))
-		case needsAttach:
+		case decision.NeedsAttach:
 			// The bead is routed to the target but carries no molecule — an
 			// earlier plain sling routed it raw. Do not treat --on as an
 			// idempotent no-op; fall through so the formula attaches.
 			check.Idempotent = false
+		case decision.SkippedForClaim:
+			// Another worker already claimed this bead and no molecule is
+			// attached. Idempotency is preserved deliberately (do not re-attach
+			// onto in-progress work), but say so explicitly: without this
+			// warning the CLI prints only the generic "already routed" message,
+			// giving no signal that the requested --on formula was never
+			// attached or that --force would override the skip.
+			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+				"bead %s is claimed by %s with no molecule attached; --on %s was skipped to avoid re-attaching onto in-progress work — rerun with --force to attach it anyway",
+				opts.BeadOrFormula, decision.Assignee, opts.OnFormula))
 		}
 	}
 	if !check.Idempotent {
@@ -253,6 +263,22 @@ func shouldCheckBeadState(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
 }
 
+// attachmentDecision is the result of onFormulaNeedsAttachment: whether an
+// --on formula attach should proceed on an otherwise-idempotent routed bead,
+// and, when it should not, why -- so the caller can distinguish "nothing to
+// do" (a molecule is already attached) from "skipped because another worker
+// owns this bead" (SkippedForClaim), which needs its own warning rather than
+// silently folding into the generic idempotent no-op.
+type attachmentDecision struct {
+	NeedsAttach bool
+	// SkippedForClaim is true when the bead has no molecule but is already
+	// claimed (Assignee set), so the attach was intentionally skipped rather
+	// than performed. Only meaningful when NeedsAttach is false.
+	SkippedForClaim bool
+	// Assignee is the claiming identity when SkippedForClaim is true.
+	Assignee string
+}
+
 // onFormulaNeedsAttachment reports whether this is an --on sling whose target
 // bead the caller has already determined reads Idempotent (gc.routed_to ==
 // target, or pool-labeled) but that has no attached molecule yet. The
@@ -264,29 +290,35 @@ func shouldCheckBeadState(opts SlingOpts) bool {
 // molecule; a stale one is burned).
 //
 // The returned error is non-nil only when the molecule-attachment probe could
-// not complete. In that case the result is (false, err): the caller cannot
-// prove the bead is unmoleculed, so it must preserve the fail-closed idempotent
-// state rather than clear it and risk minting a duplicate attachment.
-func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDeps) (bool, error) {
+// not complete. In that case the result is (attachmentDecision{}, err): the
+// caller cannot prove the bead is unmoleculed, so it must preserve the
+// fail-closed idempotent state rather than clear it and risk minting a
+// duplicate attachment.
+func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDeps) (attachmentDecision, error) {
 	if opts.OnFormula == "" {
-		return false, nil
+		return attachmentDecision{}, nil
 	}
 	hasMolecule, err := HasMoleculeChildren(querier, opts.BeadOrFormula, deps.Store)
 	if err != nil {
-		return false, err
+		return attachmentDecision{}, err
 	}
 	if hasMolecule {
-		return false, nil
+		return attachmentDecision{}, nil
 	}
 	// No molecule attached. Only override idempotency for an UNCLAIMED bead — the
 	// routed-raw footgun (gc.routed_to set, no assignee, no molecule). If a worker
 	// has already claimed it (assignee set), leave it idempotent rather than
-	// re-attaching a formula onto work in progress.
+	// re-attaching a formula onto work in progress -- but report the claim so the
+	// caller can warn that the attach was skipped, distinctly from "already done".
 	bead, ok := BeadFromGetters(opts.BeadOrFormula, querier, deps.Store)
 	if !ok {
-		return false, nil
+		return attachmentDecision{}, nil
 	}
-	return strings.TrimSpace(bead.Assignee) == "", nil
+	assignee := strings.TrimSpace(bead.Assignee)
+	if assignee == "" {
+		return attachmentDecision{NeedsAttach: true}, nil
+	}
+	return attachmentDecision{SkippedForClaim: true, Assignee: assignee}, nil
 }
 
 func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {
@@ -389,12 +421,51 @@ func rootOnlyVaporPourHint(formulaName string, recipe *formula.Recipe) string {
 
 // slingOnFormula handles the --on formula attachment path.
 func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID string, result SlingResult) (SlingResult, error) {
-	return attachFormulaToBead(opts, deps, querier, beadID, opts.OnFormula, "on-formula", "formula", result)
+	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.OnFormula, "on-formula", "formula", result)
+	if err == nil {
+		if hint := attachedBeadInstructionsDroppedHint(querier, beadID, opts.Vars); hint != "" {
+			result.BeadWarnings = append(result.BeadWarnings, hint)
+		}
+	}
+	return result, err
+}
+
+// attachedBeadInstructionsDroppedHint returns a sling-time diagnostic when
+// --on/default-formula attaches a formula to an existing bead whose own
+// description carries real instructions. The formula wisp root's own
+// description is always the FORMULA's own boilerplate
+// (internal/formula/compile.go rootDesc), never the target bead's text, and
+// no formula var exposes the bead's Description either — so a bead's
+// instructions are otherwise silently invisible to the formula's rendered
+// context, unless the caller explicitly carries them in via
+// context_path/requirements_path (#3681). It changes neither routing nor
+// the materialized wisp.
+func attachedBeadInstructionsDroppedHint(querier BeadQuerier, beadID string, userVars []string) string {
+	if querier == nil || beadID == "" {
+		return ""
+	}
+	for _, v := range userVars {
+		key, _, ok := strings.Cut(v, "=")
+		if ok && (key == "context_path" || key == "requirements_path") {
+			return ""
+		}
+	}
+	bead, err := querier.Get(beadID)
+	if err != nil || strings.TrimSpace(bead.Description) == "" {
+		return ""
+	}
+	return fmt.Sprintf("note: bead %s's description is not carried into the formula's rendered context — pass --var context_path=<dir> or --var requirements_path=<doc> to include your instructions, or the formula's brainstorm will not see them.", beadID)
 }
 
 // slingDefaultFormula handles the default formula attachment path.
 func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID string, result SlingResult) (SlingResult, error) {
-	return attachFormulaToBead(opts, deps, querier, beadID, opts.Target.EffectiveDefaultSlingFormula(), "default-on-formula", "default formula", result)
+	result, err := attachFormulaToBead(opts, deps, querier, beadID, opts.Target.EffectiveDefaultSlingFormula(), "default-on-formula", "default formula", result)
+	if err == nil {
+		if hint := attachedBeadInstructionsDroppedHint(querier, beadID, opts.Vars); hint != "" {
+			result.BeadWarnings = append(result.BeadWarnings, hint)
+		}
+	}
+	return result, err
 }
 
 // attachFormulaToBead runs the shared formula-attachment pipeline for both the
@@ -420,9 +491,10 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			Title: opts.Title,
 			Vars:  formulaVars,
 		}); err != nil {
+			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
-		return withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
+		lockedResult, lockedErr := withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
 			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
@@ -450,6 +522,15 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			}
 			return wfResult, wfErr
 		})
+		if lockedErr != nil {
+			// The pour failed after minting its synthetic input convoy
+			// (children-conflict, snapshot, instantiate, or start failure —
+			// the started-workflow path returns nil error). Close the pour's
+			// own artifact so repeated failures do not accumulate open
+			// claim-attracting convoys.
+			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
+		}
+		return lockedResult, lockedErr
 	}
 	if err := validateSlingFormulaRuntimeVars(context.Background(), formulaName, searchPaths, molecule.Options{
 		Title: opts.Title,
@@ -534,7 +615,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		}
 		req := RouteRequest{
 			BeadID:  beadID,
-			Target:  a.QualifiedName(),
+			Target:  agentutil.RoutedToIdentity(&a),
 			WorkDir: rigDir,
 			Env:     slingEnv,
 			Force:   opts.Force,
