@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -273,9 +274,47 @@ func mergeSkillFingerprintEntries(fpExtra map[string]string, desired []materiali
 		fpExtra = make(map[string]string, len(desired))
 	}
 	for _, e := range desired {
-		fpExtra["skills:"+e.Name] = runtime.HashPathContent(e.Source)
+		fpExtra["skills:"+e.Name] = runtime.HashPathContentExcluding(e.Source, isVolatileGCArtifact)
 	}
 	return fpExtra
+}
+
+// isVolatileGCArtifact reports whether a slash-separated path relative to a
+// skill source directory names a gc-managed materialization artifact rather
+// than skill content. Such artifacts must NOT participate in the skill content
+// fingerprint: they regenerate on every reconcile tick with fresh, unique
+// contents (and, for atomic-write temps, unique UnixNano-based names), so
+// hashing them fingerprints an unchanged skill-set differently every tick and
+// drains every session for spurious config-drift (gt-c4g63).
+//
+// This matters only when a skill source tree overlaps a materialization sink or
+// a session workdir (e.g. a scope-root/agent-local skills dir that also holds
+// `.gc/`), which is exactly when these artifacts land inside the hashed tree.
+// A genuine skill directory never contains gc's own bookkeeping, so excluding
+// the gc-reserved namespace is content-preserving. Mirrors the path-only
+// treatment already given to `.gc/scripts` (isOperationalScript) and
+// `.gc/settings.json`.
+func isVolatileGCArtifact(rel string) bool {
+	base := path.Base(rel)
+	switch {
+	// Sink ownership marker (materialize.ownershipManifestFile) — rewritten
+	// on every materialization pass.
+	case base == ".gc-skill-ownership.json":
+		return true
+	// Atomic-write temps: fsys.WriteFileAtomic writes `<base>.tmp.<pid>.<nanos>`
+	// and writeSkillSnapshotFile writes `skill-catalog-<rand>.tmp`. The UnixNano
+	// nonce makes each one unique, so a caught temp yields a never-repeating hash.
+	case strings.Contains(base, ".tmp.") || strings.HasSuffix(base, ".tmp"):
+		return true
+	}
+	// Anything under a gc runtime-state directory (.gc/tmp snapshot temps,
+	// .gc/mcp-adopted timestamped snapshots, .gc/mcp-managed markers, etc.).
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == ".gc" {
+			return true
+		}
+	}
+	return false
 }
 
 // effectiveInjectAssignedSkills resolves the agent's prompt-appendix
