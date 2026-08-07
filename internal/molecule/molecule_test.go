@@ -3504,3 +3504,46 @@ func TestInstantiate_DeferredStepsStayGate(t *testing.T) {
 		t.Errorf("deferred step.Type = %q, want %q", b.Type, "gate")
 	}
 }
+
+// A literal {{var}} left in a routing-metadata value would mint a durable,
+// unroutable bead. validateRoutingMetadataVars must reject it the same way the
+// #618 title guard does, and must stay quiet on resolved or absent routing
+// metadata. Keys mirror beadmeta.RunTargetMetadataKey / RoutedToMetadataKey.
+func TestValidateRoutingMetadataVars(t *testing.T) {
+	const runTarget = "gc.run_target" // beadmeta.RunTargetMetadataKey
+	const routedTo = "gc.routed_to"   // beadmeta.RoutedToMetadataKey
+
+	t.Run("unresolved var in run_target rejected", func(t *testing.T) {
+		err := validateRoutingMetadataVars("step-a", map[string]string{runTarget: "{{review_target}}"})
+		if err == nil {
+			t.Fatal("want error for unresolved {{review_target}} in routing metadata")
+		}
+		if !strings.Contains(err.Error(), "unresolved variable") || !strings.Contains(err.Error(), "review_target") {
+			t.Errorf("error should name the unresolved var: %v", err)
+		}
+		if !strings.Contains(err.Error(), runTarget) {
+			t.Errorf("error should name the offending key %q: %v", runTarget, err)
+		}
+	})
+
+	t.Run("unresolved var in routed_to rejected", func(t *testing.T) {
+		if err := validateRoutingMetadataVars("step-a", map[string]string{routedTo: "{{prep_target}}"}); err == nil {
+			t.Fatal("want error for unresolved {{prep_target}} in routed_to")
+		}
+	})
+
+	t.Run("resolved routing metadata passes", func(t *testing.T) {
+		if err := validateRoutingMetadataVars("step-a", map[string]string{runTarget: "hecke/gc.run-operator", routedTo: "clark"}); err != nil {
+			t.Errorf("resolved routing metadata should pass: %v", err)
+		}
+	})
+
+	t.Run("no routing metadata passes", func(t *testing.T) {
+		if err := validateRoutingMetadataVars("step-a", map[string]string{"gc.other": "{{x}}"}); err != nil {
+			t.Errorf("non-routing metadata must not be checked: %v", err)
+		}
+		if err := validateRoutingMetadataVars("step-a", nil); err != nil {
+			t.Errorf("nil metadata should pass: %v", err)
+		}
+	})
+}

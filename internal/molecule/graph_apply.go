@@ -258,6 +258,9 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 		if err := validateTimeoutMetadataVars(step.ID, node.Metadata); err != nil {
 			return nil, false, "", err
 		}
+		if err := validateRoutingMetadataVars(step.ID, node.Metadata); err != nil {
+			return nil, false, "", err
+		}
 
 		plan.Nodes = append(plan.Nodes, node)
 	}
@@ -479,6 +482,9 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 			}
 		}
 		if err := validateTimeoutMetadataVars(step.ID, node.Metadata); err != nil {
+			return nil, err
+		}
+		if err := validateRoutingMetadataVars(step.ID, node.Metadata); err != nil {
 			return nil, err
 		}
 

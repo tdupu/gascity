@@ -1375,6 +1375,31 @@ func validateTimeoutMetadataVars(stepID string, metadata map[string]string) erro
 	return nil
 }
 
+// routingResidualMetadataKeys are node.Metadata keys whose values carry a
+// routing target. A literal {{var}} left unresolved in any of them would mint a
+// durable, unroutable bead (the dispatcher routes off these keys), so they get
+// the same residual-var guard as the bead title (#618). See gs-vzc8.
+var routingResidualMetadataKeys = []string{
+	beadmeta.RunTargetMetadataKey,
+	beadmeta.RoutedToMetadataKey,
+}
+
+// validateRoutingMetadataVars rejects a step whose routing metadata still
+// contains an unresolved {{var}}, mirroring the bead-title guard so an
+// unroutable bead is caught before the durable graph write.
+func validateRoutingMetadataVars(stepID string, metadata map[string]string) error {
+	for _, key := range routingResidualMetadataKeys {
+		raw := metadata[key]
+		if !strings.Contains(raw, "{{") {
+			continue
+		}
+		if residual := formula.CheckResidualVars(raw); len(residual) > 0 {
+			return fmt.Errorf("step %q: routing metadata %s contains unresolved variable(s) %s — missing or misspelled --var(s)?", stepID, key, strings.Join(residual, ", "))
+		}
+	}
+	return nil
+}
+
 func deferBeadRouting(b *beads.Bead) {
 	if !beads.IsReadyExcludedBead(*b) {
 		beadType := b.Type
