@@ -10258,3 +10258,48 @@ func TestRunDispatchGuardedRecoversPanic(t *testing.T) {
 		t.Errorf("expected the recovered panic to be logged, got %q", logs.String())
 	}
 }
+
+// The gt-pzbm6 skip diagnostic must stay silent for a short-lived latch, surface
+// a persistent one exactly once per interval, report an accurate held duration
+// sourced from the episode onset (not any history cache), and reset per episode
+// so an unrelated later latch starts silent again.
+func TestLatchSkipShouldLog(t *testing.T) {
+	m := &memoryOrderDispatcher{}
+	t0 := time.Now()
+
+	// First skip: always silent, zero held.
+	if held, log := m.latchSkipShouldLog("order-x", t0); log || held != 0 {
+		t.Fatalf("first skip: held=%v log=%v, want 0/false (first skip is silent)", held, log)
+	}
+	// Within the grace window: still silent, held tracks real elapsed time.
+	if held, log := m.latchSkipShouldLog("order-x", t0.Add(latchSkipLogInterval-time.Second)); log {
+		t.Fatalf("skip within grace window logged (held=%v), want silent", held)
+	}
+	// Past the grace window: log once, with an accurate held duration.
+	held, log := m.latchSkipShouldLog("order-x", t0.Add(latchSkipLogInterval))
+	if !log {
+		t.Fatalf("skip past grace window did not log, want log")
+	}
+	if held != latchSkipLogInterval {
+		t.Fatalf("held=%v, want %v (derived from onset, not a cache)", held, latchSkipLogInterval)
+	}
+	// Immediately after logging: rate-limited, silent.
+	if _, log := m.latchSkipShouldLog("order-x", t0.Add(latchSkipLogInterval+time.Second)); log {
+		t.Fatalf("skip logged again within the interval, want rate-limited silence")
+	}
+	// A full interval after the last log: logs again.
+	if _, log := m.latchSkipShouldLog("order-x", t0.Add(2*latchSkipLogInterval+time.Second)); !log {
+		t.Fatalf("skip did not log after a full interval elapsed, want log")
+	}
+
+	// Clearing ends the episode: the next skip is silent again (new onset).
+	m.latchSkipClear("order-x")
+	if _, log := m.latchSkipShouldLog("order-x", t0.Add(3*latchSkipLogInterval)); log {
+		t.Fatalf("first skip after clear logged, want silent (episode reset)")
+	}
+
+	// Distinct keys (tracking gate vs work gate) are independent episodes.
+	if _, log := m.latchSkipShouldLog("work:order-x", t0); log {
+		t.Fatalf("first skip on a distinct key logged, want silent")
+	}
+}

@@ -298,6 +298,8 @@ type memoryOrderDispatcher struct {
 	cacheMu              sync.Mutex
 	lastRunCache         map[string]time.Time
 	gateBackoffUntil     map[string]time.Time
+	latchSkipOnset       map[string]time.Time // per-latch-episode onset; cleared on successful dispatch
+	latchSkipLastLog     map[string]time.Time // last skip-log time per key; rate-limits the diagnostic
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -551,8 +553,16 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 		}
 		if hasOpenTracking {
+			// A prior-run tracking bead is still open, so this order is held
+			// back. This was a silent continue and could freeze formula-order
+			// dispatch with no diagnostic (gt-pzbm6 / C.9). Surface it once the
+			// latch has been held past the grace window, rate-limited.
+			if held, shouldLog := m.latchSkipShouldLog(scoped, now); shouldLog {
+				logDispatchError(m.stderr, "gc: order dispatch: %s skipped: open tracking bead present, latch held %s (gt-pzbm6)", scoped, held.Round(time.Second))
+			}
 			continue
 		}
+		m.latchSkipClear(scoped)
 
 		baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate, orders.LastRunAcross(orderFrontDoorsForStores(storesForGate)))
 		var lastRunErr error
@@ -657,8 +667,16 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 		}
 		if hasOpenWork {
+			// Prior work isn't processed yet, so dispatch is held. Same
+			// gt-pzbm6 silent-continue: make a stuck work gate visible once
+			// the latch has been held past the grace window, rate-limited.
+			workKey := "work:" + scoped
+			if held, shouldLog := m.latchSkipShouldLog(workKey, now); shouldLog {
+				logDispatchError(m.stderr, "gc: order dispatch: %s skipped: prior work bead still open, latch held %s (gt-pzbm6)", scoped, held.Round(time.Second))
+			}
 			continue
 		}
+		m.latchSkipClear("work:" + scoped)
 
 		// Create the tracking bead (which suppresses re-fire on the next tick)
 		// and launch the shared dispatch core. The webhook receiver fires the
@@ -1103,6 +1121,60 @@ func (m *memoryOrderDispatcher) setGateBackoff(key string, until time.Time) {
 	}
 	if existing, ok := m.gateBackoffUntil[key]; !ok || until.After(existing) {
 		m.gateBackoffUntil[key] = until
+	}
+}
+
+// latchSkipLogInterval bounds both the initial grace window and the repeat
+// cadence of the open-gate skip diagnostic (gt-pzbm6).
+const latchSkipLogInterval = 5 * time.Minute
+
+// latchSkipShouldLog decides whether a silently-skipped dispatch (an order held
+// back by the open-tracking or open-work gate) should emit a diagnostic this
+// tick, and returns how long the current latch episode has been held.
+//
+// The FIRST skip for a key is always silent: a legitimate short-lived latch
+// (in-flight work, a brief trigger-env failure) must not produce log noise.
+// Once the latch has been held past latchSkipLogInterval the skip is logged,
+// then re-logged at most once per interval. held is derived from the episode
+// onset recorded here — NOT from the last-run history cache — so it is accurate
+// even in a full freeze where no order reaches the work gate to warm that cache
+// (the failure mode that made the original gt-pzbm6 self-heal unreliable).
+//
+// State is per episode: latchSkipClear resets a key once its order dispatches,
+// so a later, unrelated latch starts silent again rather than logging on its
+// first skip.
+func (m *memoryOrderDispatcher) latchSkipShouldLog(key string, now time.Time) (held time.Duration, shouldLog bool) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.latchSkipOnset == nil {
+		m.latchSkipOnset = make(map[string]time.Time)
+		m.latchSkipLastLog = make(map[string]time.Time)
+	}
+	onset, seen := m.latchSkipOnset[key]
+	if !seen {
+		m.latchSkipOnset[key] = now
+		return 0, false
+	}
+	held = now.Sub(onset)
+	if held < latchSkipLogInterval {
+		return held, false
+	}
+	if last, ok := m.latchSkipLastLog[key]; ok && now.Sub(last) < latchSkipLogInterval {
+		return held, false
+	}
+	m.latchSkipLastLog[key] = now
+	return held, true
+}
+
+// latchSkipClear ends the latch episode for key so its next skip starts silent
+// again. Call after an order successfully dispatches. A nil map is fine; delete
+// on a missing key is a no-op.
+func (m *memoryOrderDispatcher) latchSkipClear(keys ...string) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	for _, key := range keys {
+		delete(m.latchSkipOnset, key)
+		delete(m.latchSkipLastLog, key)
 	}
 }
 
