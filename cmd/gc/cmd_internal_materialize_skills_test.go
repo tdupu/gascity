@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
 )
 
@@ -770,6 +772,105 @@ provider = "file"
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("pass 2 stdout missing %q: %q", want, stdout.String())
 		}
+	}
+}
+
+// TestInternalMaterializeSkillsSkipBuiltinPackRefresh guards the gt-uv6h0e
+// fix: --skip-builtin-pack-refresh routes the config load through the
+// no-refresh loader so the pre_start child does NOT re-run the builtin-pack
+// readiness/refresh pass (which cold-walks ~/.gc/cache/repos on every
+// city-scope spawn). Both loaders are wrapped so the test observes exactly
+// which one the flag selected, then asserts skills still materialize either
+// way. Cases:
+//   - flag off (default): the full-refresh loader runs; skills materialize.
+//   - flag on: only the no-refresh loader runs (readiness pass skipped); the
+//     config still loads and skills still materialize (best-effort intact).
+func TestInternalMaterializeSkillsSkipBuiltinPackRefresh(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+`
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeSkillSource(t, filepath.Join(cityDir, "skills", "plan"))
+	link := filepath.Join(cityDir, "skills", "plan")
+
+	// Wrap both loaders to record which one the command invokes, restoring
+	// the originals on cleanup.
+	origFull := materializeLoadCityConfig
+	origNoRefresh := materializeLoadCityConfigNoRefresh
+	t.Cleanup(func() {
+		materializeLoadCityConfig = origFull
+		materializeLoadCityConfigNoRefresh = origNoRefresh
+	})
+	var fullCalls, noRefreshCalls int
+	materializeLoadCityConfig = func(cp string, w ...io.Writer) (*config.City, error) {
+		fullCalls++
+		return origFull(cp, w...)
+	}
+	materializeLoadCityConfigNoRefresh = func(cp string, w ...io.Writer) (*config.City, error) {
+		noRefreshCalls++
+		return origNoRefresh(cp, w...)
+	}
+
+	// Flag OFF (default): full-refresh loader runs, no-refresh loader does not.
+	workdirOff := t.TempDir()
+	var so, se bytes.Buffer
+	if code := run([]string{
+		"internal", "materialize-skills",
+		"--agent", "mayor",
+		"--workdir", workdirOff,
+	}, &so, &se); code != 0 {
+		t.Fatalf("flag-off exit %d: stderr=%q stdout=%q", code, se.String(), so.String())
+	}
+	if fullCalls != 1 || noRefreshCalls != 0 {
+		t.Fatalf("flag-off: want full=1 noRefresh=0, got full=%d noRefresh=%d", fullCalls, noRefreshCalls)
+	}
+	if _, err := os.Lstat(filepath.Join(workdirOff, ".claude", "skills", "plan")); err != nil {
+		t.Fatalf("flag-off: skill not materialized: %v", err)
+	}
+
+	// Flag ON: no-refresh loader runs, full-refresh (readiness pass) skipped;
+	// skills still materialize and exit is 0.
+	fullCalls, noRefreshCalls = 0, 0
+	workdirOn := t.TempDir()
+	so.Reset()
+	se.Reset()
+	if code := run([]string{
+		"internal", "materialize-skills",
+		"--best-effort", "--skip-builtin-pack-refresh",
+		"--agent", "mayor",
+		"--workdir", workdirOn,
+	}, &so, &se); code != 0 {
+		t.Fatalf("flag-on exit %d: stderr=%q stdout=%q", code, se.String(), so.String())
+	}
+	if fullCalls != 0 || noRefreshCalls != 1 {
+		t.Fatalf("flag-on: builtin-pack readiness pass must be skipped; want full=0 noRefresh=1, got full=%d noRefresh=%d", fullCalls, noRefreshCalls)
+	}
+	materialized := filepath.Join(workdirOn, ".claude", "skills", "plan")
+	info, err := os.Lstat(materialized)
+	if err != nil {
+		t.Fatalf("flag-on: skill not materialized: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("flag-on: %s is not a symlink", materialized)
+	}
+	tgt, err := os.Readlink(materialized)
+	if err != nil {
+		t.Fatalf("flag-on: readlink: %v", err)
+	}
+	if tgt != link {
+		t.Fatalf("flag-on: symlink target = %q, want %q", tgt, link)
 	}
 }
 
