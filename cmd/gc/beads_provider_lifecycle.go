@@ -1009,6 +1009,9 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	if err != nil {
 		return err
 	}
+	// Close the probe store after verification so bd-scope init doesn't leak
+	// the *sql.DB pool (same class as tdupu/gascity#18).
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 	return verifyCanonicalBdScopeStoreReady(store, time.Sleep)
 }
 
@@ -1224,6 +1227,10 @@ func waitForBeadsScopeReadyAfterRecovery(scopeRoot, cityPath string, deadline ti
 		store, err := openStoreAtForCity(scopeRoot, cityPath)
 		if err == nil {
 			pingErr := store.Ping()
+			// Readiness probe only: close the *sql.DB pool each iteration so
+			// repeated post-recovery waits don't leak one connectionOpener
+			// goroutine + open FDs per open (tdupu/gascity#18).
+			_ = closeBeadStoreHandle(store)
 			if pingErr == nil {
 				return nil
 			}
