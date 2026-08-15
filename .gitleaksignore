@@ -30,3 +30,10 @@ ce30237e8a4ed2249f1b1a38663f542a249aa210:cmd/gc/productmetrics_private_process_t
 f8b51359ba093cfe5b9b90697b2f25a94b90fb0d:cmd/gc/usage_compute_test.go:generic-api-key:339
 f8b51359ba093cfe5b9b90697b2f25a94b90fb0d:cmd/gc/usage_compute_test.go:generic-api-key:456
 f8b51359ba093cfe5b9b90697b2f25a94b90fb0d:internal/worker/invocation_telemetry_usagefact_test.go:generic-api-key:471
+
+# 2026-08-15 upstream (gastownhall) test-fixture false positives surfaced by the
+# 236-commit reconcile merge: a placeholder generic token and a session-key test
+# UUID, both in upstream *_test.go, already public, none in local commits.
+# (secret strings intentionally not quoted here — that would re-trip the scanner.)
+3daba00277e51bbf1de230c11cd966e33e6e3d39:internal/storebinding/provider_endpoint_test.go:generic-api-key:84
+ad4d0ab4a9e14f57faed3eaa20a658ef743e1c09:cmd/gc/usage_compute_test.go:generic-api-key:306
