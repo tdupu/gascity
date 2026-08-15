@@ -365,7 +365,7 @@ func TestResolveAgentIdentityRejectsCanonicalSingletonPoolSuffix(t *testing.T) {
 }
 
 // TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance is a regression
-// for gt-gf0tk: a binding-qualified, city-scoped pool instance like
+// for gt-gf0tk / #4843: a binding-qualified, city-scoped pool instance like
 // "mathcity.brief-operator-1" must resolve to its "mathcity.brief-operator"
 // pool. The CLI-local resolveAgentIdentity gated its Step 2b pool-instance
 // check on strings.Contains(input, "/"), so the dot-qualified form was never
@@ -383,6 +383,9 @@ func TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance(t *testing.T) 
 	}
 	if a.Name != "brief-operator-1" {
 		t.Fatalf("resolveAgentIdentity(mathcity.brief-operator-1) resolved Name = %q, want %q", a.Name, "brief-operator-1")
+	}
+	if _, ok := resolveAgentIdentity(cfg, "mathcity.brief-operator-13", ""); ok {
+		t.Fatal("resolveAgentIdentity(mathcity.brief-operator-13) = true, want false: exceeds max_active_sessions=12")
 	}
 }
 
