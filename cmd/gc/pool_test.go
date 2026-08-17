@@ -1013,6 +1013,32 @@ func TestRunPoolOnBoot(t *testing.T) {
 	}
 }
 
+func TestRunPoolOnBootReportsProgressBeforeEachHook(t *testing.T) {
+	var progress []string
+	runner := func(_, _ string, _ map[string]string) (string, error) {
+		progress = append(progress, "runner")
+		return "", nil
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2), OnBoot: "bd update --unclaim"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	runPoolOnBootWithProgress(cfg, t.TempDir(), runner, &stderr, func(current, total int, agent string) {
+		progress = append(progress, fmt.Sprintf("%d/%d:%s", current, total, agent))
+	})
+
+	want := []string{"1/2:dog", "runner", "2/2:cat", "runner"}
+	if strings.Join(progress, "|") != strings.Join(want, "|") {
+		t.Fatalf("progress = %v, want %v", progress, want)
+	}
+}
+
 func TestRunPoolOnBootError(t *testing.T) {
 	runner := func(_, _ string, _ map[string]string) (string, error) {
 		return "", fmt.Errorf("bd not found")

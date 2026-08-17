@@ -397,10 +397,21 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	return dst
 }
 
+type poolOnBootProgress func(current, total int, agent string)
+
 // runPoolOnBoot runs on_boot commands for all pool agents at controller startup.
 // Errors are logged but not fatal — the controller continues regardless.
 func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer) {
+	runPoolOnBootWithProgress(cfg, cityPath, runner, stderr, nil)
+}
+
+func runPoolOnBootWithProgress(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer, progress poolOnBootProgress) {
 	cityName := workdirutil.CityName(cityPath, cfg)
+	type onBootTask struct {
+		agent config.Agent
+		cmd   string
+	}
+	var tasks []onBootTask
 	for _, a := range cfg.Agents {
 		if !a.SupportsInstanceExpansion() || a.Implicit {
 			continue
@@ -409,6 +420,14 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 		if cmd == "" {
 			continue
 		}
+		tasks = append(tasks, onBootTask{agent: a, cmd: cmd})
+	}
+	for i, task := range tasks {
+		a := task.agent
+		if progress != nil {
+			progress(i+1, len(tasks), a.QualifiedName())
+		}
+		cmd := task.cmd
 		cmd = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "on_boot", cmd, stderr)
 		dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &a)
