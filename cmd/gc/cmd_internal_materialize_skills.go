@@ -29,6 +29,21 @@ func newInternalCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+// cityConfigLoader loads a city config from cityPath, optionally emitting
+// advisory warnings to the supplied writers. loadCityConfig (full builtin-pack
+// readiness pass) and loadCityConfigWithoutBuiltinPackRefresh both satisfy it.
+type cityConfigLoader func(cityPath string, warningWriter ...io.Writer) (*config.City, error)
+
+// materializeLoadCityConfig and materializeLoadCityConfigNoRefresh are the two
+// loaders the materialize-skills command routes between on the
+// --skip-builtin-pack-refresh flag. They are package variables so tests can
+// observe which loader the flag selected (gt-uv6h0e) without depending on the
+// global loadCityConfigCalls counter, which other resolution steps also move.
+var (
+	materializeLoadCityConfig          cityConfigLoader = loadCityConfig
+	materializeLoadCityConfigNoRefresh cityConfigLoader = loadCityConfigWithoutBuiltinPackRefresh
+)
+
 // newInternalMaterializeSkillsCmd materializes skills for one agent
 // into one working directory. Invoked from a session PreStart when the
 // runtime is stage-2-eligible (subprocess, tmux) and the session's
@@ -40,7 +55,7 @@ func newInternalCmd(stdout, stderr io.Writer) *cobra.Command {
 // build desired set → materialize. Never invoked by humans directly.
 func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 	var agentName, workdir, sharedCatalogSnapshot, sharedCatalogSnapshotFile string
-	var bestEffort bool
+	var bestEffort, skipBuiltinPackRefresh bool
 	cmd := &cobra.Command{
 		Use:    "materialize-skills",
 		Short:  "Materialize skills for one agent into one workdir",
@@ -64,7 +79,18 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			cfg, err := loadCityConfig(cityPath, stderr)
+			// The pre_start caller (appendMaterializeSkillsPreStart) passes
+			// --skip-builtin-pack-refresh: the controller that resolved this
+			// agent's session already ran the builtin-pack readiness pass while
+			// loading the city config, so the on-disk pack cache is warm before
+			// this child spawns. Re-running the pass here would cold-walk
+			// ~/.gc/cache/repos on every city-scope spawn (gt-uv6h0e). Direct or
+			// standalone invocations (flag default false) keep the self-heal.
+			loadCity := materializeLoadCityConfig
+			if skipBuiltinPackRefresh {
+				loadCity = materializeLoadCityConfigNoRefresh
+			}
+			cfg, err := loadCity(cityPath, stderr)
 			if err != nil {
 				if bestEffort {
 					fmt.Fprintf(stderr, "gc internal materialize-skills: city config unavailable: %v; skipping (best-effort)\n", err) //nolint:errcheck // best-effort stderr
@@ -137,6 +163,7 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&sharedCatalogSnapshot, "shared-catalog-snapshot", "", "base64-encoded shared catalog snapshot from the controller")
 	cmd.Flags().StringVar(&sharedCatalogSnapshotFile, "shared-catalog-snapshot-file", "", "path to a file containing the base64-encoded shared catalog snapshot (preferred over --shared-catalog-snapshot for large catalogs to avoid argv/env limits)")
 	cmd.Flags().BoolVar(&bestEffort, "best-effort", false, "warn and exit 0 instead of failing when city path, city config, or agent identity can't be resolved; used by pre_start so session startup is non-fatal when city state is transiently unavailable (dirty import cache, missing city.toml) or the session identity can't be matched to a config template")
+	cmd.Flags().BoolVar(&skipBuiltinPackRefresh, "skip-builtin-pack-refresh", false, "load the city config without re-running the builtin-pack readiness/refresh pass; the pre_start caller sets this because the controller that spawned this session already hydrated the pack cache, so re-walking it on every city-scope spawn is pure redundant work (gt-uv6h0e). Direct/standalone invocations leave it false to keep the cold-cache self-heal")
 	return cmd
 }
 

@@ -433,8 +433,14 @@ func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, ori
 // The gc binary path comes from $GC_BIN (populated by the runtime env
 // setup) with "gc" as a fallback if the env var isn't available at
 // PreStart expansion time. Argument values are shell-quoted.
+//
+// --skip-builtin-pack-refresh is passed because the controller that
+// resolved this session already ran the builtin-pack readiness pass while
+// loading the city config, so the on-disk pack cache is warm before this
+// child spawns. Skipping the pass here avoids a redundant cold walk of
+// ~/.gc/cache/repos on every city-scope spawn (gt-uv6h0e).
 func appendMaterializeSkillsPreStart(prestart []string, qualifiedName, workDir string) []string {
-	cmd := `"${GC_BIN:-gc}" internal materialize-skills --best-effort --agent ` +
+	cmd := `"${GC_BIN:-gc}" internal materialize-skills --best-effort --skip-builtin-pack-refresh --agent ` +
 		shellquote.Join([]string{qualifiedName}) + ` --workdir ` + shellquote.Join([]string{workDir})
 	return append(prestart, cmd)
 }
