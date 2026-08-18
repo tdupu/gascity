@@ -961,7 +961,7 @@ func shortCircuitAlreadyStartingOrRunning(cityPath, nameOverride string, stdout,
 	if stdout != nil {
 		fmt.Fprintf(stdout, "City '%s' start is already in progress (status: %s); waiting for it to finish instead of starting a new one.\n", name, statusDisplayText(status)) //nolint:errcheck // best-effort stdout
 	}
-	waitTimeout := supervisorCityStartTimeout(cityPath) // NOTE: superseded by resolveSupervisorCityStartWait once #5379's fix (branch fix/start-readiness-silent-phase) merges; update this call site then.
+	waitTimeout, _ := resolveSupervisorCityStartWait(cityPath)
 	if err := waitForSupervisorCityHook(cityPath, true, waitTimeout, stdout); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err)                               //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "gc start: check 'gc supervisor logs' for details") //nolint:errcheck // best-effort stderr
