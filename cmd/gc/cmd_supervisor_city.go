@@ -885,10 +885,26 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			return true, 1
 		}
 		if err := waitForSupervisorCityHook(cityPath, false, supervisorCityStopTimeout(cityPath), nil); err != nil {
-			writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
-			return true, 1
+			// A bounded wait that expires is not proof the stop failed. Rolling the
+			// unregister transaction back makes the supervisor boot the city again,
+			// which contradicts the operator's request, so only roll back when the
+			// city is genuinely still running.
+			if running, _, known := supervisorCityRunningHook(cityPath); !known || !running {
+				fmt.Fprintf(stderr, "%s: %v; city is not running, keeping '%s' unregistered\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+			} else {
+				writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
+				return true, 1
+			}
 		}
 		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
+			// Same postcondition re-check: the controller may have exited just after
+			// the wait window closed. Treat an actually-stopped controller as success
+			// rather than rolling the unregister back and restarting the city the
+			// operator asked to stop.
+			if pid := controllerAliveHook(cityPath); pid == 0 {
+				fmt.Fprintf(stderr, "%s: %v; controller is stopped, keeping '%s' unregistered\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+				return true, 0
+			}
 			writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
 			return true, 1
 		}
@@ -900,6 +916,9 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 }
 
 var waitForSupervisorControllerStopHook = waitForSupervisorControllerStop
+
+// controllerAliveHook lets tests drive the stop postcondition re-check.
+var controllerAliveHook = controllerAlive
 
 var waitForSupervisorCityHook = waitForSupervisorCity
 
