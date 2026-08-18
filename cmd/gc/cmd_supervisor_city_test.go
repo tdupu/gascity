@@ -163,7 +163,12 @@ func TestRegisterCityWithSupervisorKeepsRegistrationWhenCityNeverBecomesReady(t 
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n[session]\nstartup_timeout = \"20ms\"\n"), 0o644); err != nil {
+	// daemon.start_ready_timeout is now the canonical explicit opt-in into a
+	// readiness deadline (see resolveSupervisorCityStartWait / #5379): a bare
+	// package default with nothing explicit configured is unbounded, so this
+	// test's "never becomes ready" city needs an explicit deadline to ever
+	// return instead of waiting forever.
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n[daemon]\nstart_ready_timeout = \"20ms\"\n[session]\nstartup_timeout = \"20ms\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
