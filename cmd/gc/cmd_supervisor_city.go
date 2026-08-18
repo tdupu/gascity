@@ -348,6 +348,11 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
+	if commandName == "gc start" {
+		if done, code := shortCircuitAlreadyStartingOrRunning(cityPath, nameOverride, stdout, stderr); done {
+			return code
+		}
+	}
 	// Only the registry-mutating intent commands gate interactively on
 	// cross-city impact. Operational entry points (gc start) and any future
 	// caller warn-and-proceed: the guard still prints the audit warning but
@@ -924,4 +929,43 @@ func supervisorCityRunning(cityPath string) (running bool, status string, known 
 		}
 	}
 	return false, "", false
+}
+
+// shortCircuitAlreadyStartingOrRunning reports on, and skips straight past,
+// gc start's register/reload/wait sequence when the city is already running
+// or already mid-start under the supervisor. Without this, a second gc start
+// invoked while one is in flight re-triggers ensureSupervisorRunning and a
+// fresh supervisor reload -- redundant at best, and liable to collide with
+// the reconcile-queue-busy path (#5343) at worst.
+func shortCircuitAlreadyStartingOrRunning(cityPath, nameOverride string, stdout, stderr io.Writer) (handled bool, code int) {
+	running, status, known := supervisorCityRunningHook(cityPath)
+	if !known {
+		return false, 0
+	}
+	name, err := registeredCityName(cityPath, nameOverride)
+	if err != nil || name == "" {
+		name = cityPath
+	}
+	if running {
+		if stdout != nil {
+			fmt.Fprintf(stdout, "City '%s' is already running.\n", name) //nolint:errcheck // best-effort stdout
+		}
+		return true, 0
+	}
+	if status == "" || status == "init_failed" {
+		// Not yet known to be mid-start (fresh registration, or the
+		// supervisor already flagged a hard failure); let the normal
+		// register/reload/wait sequence run and surface it as usual.
+		return false, 0
+	}
+	if stdout != nil {
+		fmt.Fprintf(stdout, "City '%s' start is already in progress (status: %s); waiting for it to finish instead of starting a new one.\n", name, statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+	}
+	waitTimeout := supervisorCityStartTimeout(cityPath) // NOTE: superseded by resolveSupervisorCityStartWait once #5379's fix (branch fix/start-readiness-silent-phase) merges; update this call site then.
+	if err := waitForSupervisorCityHook(cityPath, true, waitTimeout, stdout); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err)                               //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc start: check 'gc supervisor logs' for details") //nolint:errcheck // best-effort stderr
+		return true, 1
+	}
+	return true, 0
 }
