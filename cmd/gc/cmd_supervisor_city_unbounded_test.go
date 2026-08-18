@@ -113,6 +113,44 @@ func TestWaitForSupervisorCityUnboundedFailsWhenSupervisorDies(t *testing.T) {
 	}
 }
 
+// A long unbounded wait must emit periodic heartbeats naming the no-deadline
+// state, so it reads as a deliberate wait rather than a hang.
+func TestWaitForSupervisorCityUnboundedHeartbeats(t *testing.T) {
+	oldRunning := supervisorCityRunningHook
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorCityPollInterval
+	oldBeat := supervisorCityHeartbeatInterval
+	t.Cleanup(func() {
+		supervisorCityRunningHook = oldRunning
+		supervisorAliveHook = oldAlive
+		supervisorCityPollInterval = oldPoll
+		supervisorCityHeartbeatInterval = oldBeat
+	})
+
+	calls := 0
+	supervisorCityRunningHook = func(string) (bool, string, bool) {
+		calls++
+		if calls >= 10 {
+			return true, "", true
+		}
+		return false, "opening_controller_state", true
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorCityPollInterval = 5 * time.Millisecond
+	supervisorCityHeartbeatInterval = 10 * time.Millisecond
+
+	var stdout bytes.Buffer
+	if err := waitForSupervisorCity(t.TempDir(), true, 0, &stdout); err != nil {
+		t.Fatalf("waitForSupervisorCity returned %v, want success", err)
+	}
+	got := stdout.String()
+	for _, want := range []string{"still waiting", "opening_controller_state", "elapsed", "no readiness deadline set"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout = %q, want heartbeat containing %q", got, want)
+		}
+	}
+}
+
 // resolveSupervisorCityStartWait precedence: --timeout flag, then explicit
 // daemon.start_ready_timeout, then unbounded.
 func TestResolveSupervisorCityStartWaitPrecedence(t *testing.T) {
