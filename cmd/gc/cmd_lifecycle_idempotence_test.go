@@ -3,64 +3,10 @@ package main
 import (
 	"bytes"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/supervisor"
 )
-
-// gc stop on a city that was never registered and has no standalone
-// controller running must say so and return success immediately, instead of
-// running the full interrupt/kill/orphan-cleanup sequence against nothing.
-func TestCmdStopReportsAlreadyStoppedForUnregisteredCity(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
-
-	cityPath := filepath.Join(t.TempDir(), "quiet-town")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"quiet-town\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	outcome := cmdStopJSONSequence([]string{cityPath}, &stdout, &stderr, false, false, true)
-	if outcome.code != 0 {
-		t.Fatalf("cmdStopJSONSequence code = %d, want 0; stderr=%q", outcome.code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "quiet-town") || !strings.Contains(stdout.String(), "already stopped") {
-		t.Fatalf("stdout = %q, want an already-stopped message naming the city", stdout.String())
-	}
-}
-
-// A REGISTERED city must never be short-circuited as "already stopped", even
-// if the supervisor reports it not running -- only unregistered + no
-// standalone controller counts. This is the conservative half of the fix
-// (#5380 is exactly the failure mode of a stray/incorrect registration
-// determining runtime state); cityFullyStopped must fall through to the
-// real stop sequence whenever a registration is present.
-func TestCityFullyStoppedIsFalseWhenRegistered(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
-
-	cityPath := filepath.Join(t.TempDir(), "busy-town")
-	if err := os.MkdirAll(cityPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if err := reg.Register(cityPath, "busy-town"); err != nil {
-		t.Fatal(err)
-	}
-
-	stopped, name := cityFullyStopped(cityPath)
-	if stopped {
-		t.Fatalf("cityFullyStopped = (true, %q), want false for a registered city", name)
-	}
-}
 
 // gc start on a city the supervisor already reports running must say so and
 // return success immediately, without re-registering, re-reloading the

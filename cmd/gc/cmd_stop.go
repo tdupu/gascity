@@ -100,13 +100,6 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		stopStdout = io.Discard
 	}
 
-	if alreadyStopped, name := cityFullyStopped(cityPath); alreadyStopped {
-		if !jsonOut {
-			fmt.Fprintf(stopStdout, "City '%s' is already stopped.\n", name) //nolint:errcheck // best-effort stdout
-		}
-		return stopCommandOutcome{cityPath: cityPath}
-	}
-
 	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force); handled {
 		if code != 0 {
 			return stopCommandOutcome{code: code, cityPath: cityPath}
@@ -654,29 +647,4 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 	}
 	gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
 	return 0
-}
-
-// cityFullyStopped reports whether a city has nothing running to stop: it is
-// not registered with the supervisor, and no standalone controller process is
-// alive. Deliberately conservative -- a REGISTERED city is never treated as
-// "already stopped" here, even if the supervisor reports it not running,
-// so this never grows into a second path that discards or restores
-// registration state (that class of bug is exactly #5380). It only
-// short-circuits the unambiguous case: a prior stop already succeeded (or
-// the city was never started) and there is truly nothing left to tear down.
-func cityFullyStopped(cityPath string) (bool, string) {
-	_, registered, err := registeredCityEntry(cityPath)
-	if err != nil || registered {
-		return false, ""
-	}
-	if controllerAlive(cityPath) != 0 {
-		return false, ""
-	}
-	name := filepath.Base(cityPath)
-	if cfg, cfgErr := loadCityConfig(cityPath, io.Discard); cfgErr == nil {
-		if trimmed := strings.TrimSpace(cfg.Workspace.Name); trimmed != "" {
-			name = trimmed
-		}
-	}
-	return true, name
 }
