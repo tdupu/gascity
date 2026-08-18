@@ -755,14 +755,30 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			return true, 1
 		}
 		if err := waitForSupervisorCityHook(cityPath, false, supervisorCityStopTimeout(cityPath), nil); err != nil {
-			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
-				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
+			// A bounded wait that expires is not proof the stop failed. Restoring
+			// registration makes the supervisor boot the city again, which
+			// contradicts the operator's request, so only restore when the city
+			// is genuinely still running.
+			if running, _, known := supervisorCityRunningHook(cityPath); !known || !running {
+				fmt.Fprintf(stderr, "%s: %v; city is not running, keeping '%s' unregistered\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
 			} else {
-				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+				if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
+					fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+				}
+				return true, 1
 			}
-			return true, 1
 		}
 		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
+			// Same postcondition re-check as above: the controller may have
+			// exited just after the wait window closed. Treat an actually-stopped
+			// controller as success rather than restoring registration and
+			// restarting the city the operator asked to stop.
+			if pid := controllerAliveHook(cityPath); pid == 0 {
+				fmt.Fprintf(stderr, "%s: %v; controller is stopped, keeping '%s' unregistered\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+				return true, 0
+			}
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
 				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
 			} else {
@@ -775,6 +791,9 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 }
 
 var waitForSupervisorControllerStopHook = waitForSupervisorControllerStop
+
+// controllerAliveHook lets tests drive the stop postcondition re-check.
+var controllerAliveHook = controllerAlive
 
 var waitForSupervisorCityHook = waitForSupervisorCity
 

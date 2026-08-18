@@ -1793,7 +1793,7 @@ func TestReconcileCitiesUnregisterSkipsRequestResultWithoutPendingRequestID(t *t
 	}
 }
 
-func TestUnregisterCityFromSupervisorRestoresRegistrationWhenControllerStopWaitFails(t *testing.T) {
+func TestUnregisterCityFromSupervisorRestoresRegistrationWhenControllerStillRunning(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
@@ -1823,6 +1823,10 @@ func TestUnregisterCityFromSupervisorRestoresRegistrationWhenControllerStopWaitF
 	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
 		return io.EOF
 	}
+	// Registration is only restored when the controller is genuinely still up.
+	oldControllerAlive := controllerAliveHook
+	controllerAliveHook = func(string) int { return 31337 }
+	t.Cleanup(func() { controllerAliveHook = oldControllerAlive })
 
 	var stdout, stderr bytes.Buffer
 	handled, code := unregisterCityFromSupervisor(cityPath, &stdout, &stderr)
