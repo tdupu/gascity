@@ -920,6 +920,11 @@ func buildDesiredStateWithSessionBeads(
 		namedSpecs[identity] = spec
 	}
 	namedWorkReady := make(map[string]bool, len(namedSpecs))
+	// namedWorkBeadID carries the concrete assigned-work-bead ID matched below,
+	// for identities that have one. It is intentionally left unpopulated for
+	// identities that only satisfy namedDefaultDemand (no bead-specific signal
+	// available there) — see TemplateParams.BoundStepID.
+	namedWorkBeadID := make(map[string]string, len(namedSpecs))
 	for identity := range namedDefaultDemand {
 		if _, ok := namedSpecs[identity]; ok {
 			namedWorkReady[identity] = true
@@ -952,7 +957,7 @@ func buildDesiredStateWithSessionBeads(
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee != identity {
+			if !namedSessionAssigneeMatchesSpec(spec, identity, assignee) {
 				continue
 			}
 			// ga-i1d0tr Candidate B: a bare-template Assignee used to be
@@ -972,6 +977,7 @@ func buildDesiredStateWithSessionBeads(
 			}
 			fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
 			namedWorkReady[identity] = true
+			namedWorkBeadID[identity] = wb.ID
 			break
 		}
 	}
@@ -1017,6 +1023,7 @@ func buildDesiredStateWithSessionBeads(
 		tp.InstanceName = identity
 		tp.ConfiguredNamedIdentity = identity
 		tp.ConfiguredNamedMode = spec.Mode
+		tp.BoundStepID = namedWorkBeadID[identity]
 		if tp.Env == nil {
 			tp.Env = make(map[string]string)
 		}
@@ -2896,6 +2903,13 @@ func realizePoolDesiredSessions(
 				case errors.Is(err, errPoolSessionCreateProviderRed):
 					// debug-level: fires every tick during a red episode; not operator noise
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (provider red, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
+				case errors.Is(err, errPoolSessionNameUnavailable):
+					// The slot's runtime name is a function of its identity, so
+					// it cannot be worked around by minting another one — that
+					// is exactly the leak this replaced. The holder is named in
+					// the error because a stalled slot is only diagnosable if
+					// the operator can see who is sitting on the name.
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (slot stalled on its own runtime name; retrying next tick)\n", qualifiedName, err) //nolint:errcheck
 				default:
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 				}
@@ -4042,10 +4056,16 @@ func createPoolSessionBeadWithGuardedAlias(
 	if err != nil {
 		return session.Info{}, err
 	}
+	// A transient slot is a rebinding chair, not an occupant identity. It drives
+	// two decisions here: its runtime session_name must step aside from the bare
+	// slot (TransientSlot, consumed in derivePoolSessionName), and it is never
+	// persisted as an alias (persistAlias below).
+	transientSlot := usesTransientPoolSlotIdentity(cfgAgent)
 	identity := poolSessionCreateIdentity{
-		AgentName: qualifiedInstance,
-		Slot:      slot,
-		Metadata:  metadata,
+		AgentName:     qualifiedInstance,
+		Slot:          slot,
+		Metadata:      metadata,
+		TransientSlot: transientSlot,
 	}
 	// A transient slot is never reserved as an alias: it is not an identity, so
 	// there is nothing to guard against collision and nothing to persist. The
@@ -4059,7 +4079,7 @@ func createPoolSessionBeadWithGuardedAlias(
 	// the exclusion still applies and the persistence does not.
 	alias := strings.TrimSpace(qualifiedInstance)
 	persistAlias := alias
-	if usesTransientPoolSlotIdentity(cfgAgent) {
+	if transientSlot {
 		persistAlias = ""
 	}
 	if bp.beadStore == nil {
@@ -4495,47 +4515,93 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 }
 
 // collectOpenUnassignedRoutedWork gathers open, unassigned, pool-routed work from
-// the city store and every non-suspended rig store, index-aligned with the store
+// every leg the runtime plane serves routed work from, index-aligned with the store
 // and store ref that own each bead. It is the input collection for
 // canonicalizeLegacyBoundUnassignedRoutedWork: empty-assignee open work is dropped
 // by the assignee-keyed collectAssignedWorkBeadsWithStores passes, so the
-// migration re-home needs its own scan. The scan now issues one live backing
-// read per store per tick so the raw-status filter runs, which costs a
+// migration re-home needs its own scan. The scan issues one live backing
+// read per leg per tick so the raw-status filter runs, which costs a
 // backing-store round trip the cached read did not — the accepted tradeoff for
 // not counting blocked work as demand.
+//
+// # Two things changed here for the tick (ga-l7jdg)
+//
+// The leg set is Plan(RoutedWork) narrowed to the RUNTIME plane, not the census
+// sweep's. Routed work lives only in the graph store by operator ruling, so the
+// work-ledger leg could not hold this arm's answer and cost a remote round trip
+// per tick to prove it. routedWorkStoreCandidates carries the reasoning and the
+// single-store degradation.
+//
+// The legs are read CONCURRENTLY. This arm was the last sequential per-store
+// fan-out on the demand path — collectAssignedWorkBeadsWithStores has read its
+// legs in parallel for as long as it has had more than one — and the reads are
+// independent by construction: one live list per store, folded afterwards. The
+// fold stays serial and in PLAN ORDER, so the rows and their refs come out in
+// exactly the order the sequential loop produced.
+//
+// # What the repair passes riding on this read give up, and why it is nothing
+//
+// Three consumers besides the demand count read this set — the legacy-route
+// canonicalization, the control-dispatcher route repair, and the ready
+// selection — so narrowing the read narrows them too. It costs those passes
+// nothing they could have used: their whole purpose is to make a bead
+// POOL-DEMANDABLE, and a ledger-resident bead is not demandable from the runtime
+// plane whether or not its route is canonical. Canonicalizing one would produce
+// a tidier bead that still never spawns a seat. The lever that changes that is
+// `gc storage migrate` moving it to the binding, after which this arm sees it on
+// the very next tick; the lost-route half is separately converged off-tick by the
+// route-recovery backstop, which reads every leg (route_recovery_lane.go).
 func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store, []string, bool) {
 	if cfg == nil {
 		return nil, nil, nil, false
 	}
-	// Work arm (unassigned-routed re-home scan), over the Plan(Census) leg set.
 	// Refs are the canonical scoped spelling the rows' gc.root_store_ref is
 	// matched against; a binding keeps its own "class:*" ref, which reads back as
 	// city scope.
-	stores, legErr := censusStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	stores, legErr := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
 	if legErr != nil {
 		// The only demand signal this set feeds is openControlDispatcherDemand,
 		// and a refused city reporting zero would drain a live dispatcher. Say so
 		// and retain.
-		fmt.Fprintf(stderr, "collectOpenUnassignedRoutedWork: no census leg set for this city: %v\n", legErr) //nolint:errcheck
+		fmt.Fprintf(stderr, "collectOpenUnassignedRoutedWork: no routed-work leg set for this city: %v\n", legErr) //nolint:errcheck
 		return nil, nil, nil, true
 	}
+
+	type legResult struct {
+		rows []beads.Bead
+		err  error
+	}
+	results := make([]legResult, len(stores))
+	var wg sync.WaitGroup
+	for i, source := range stores {
+		if source.store == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, source classStoreCandidate) {
+			defer wg.Done()
+			// Live so the backing store's raw --status=open filter excludes blocked/
+			// deferred work: this unassigned-routed set feeds openControlDispatcherDemand
+			// and the route-repair passes, and mapBdStatus would otherwise collapse a
+			// blocked bead to "open" and let it count as spawn capacity or get its route
+			// re-stamped (EB-42o8/gc-nz5i; extends gc-4zb/#4395). See listOpenForControllerDemandLive.
+			rows, err := listOpenForControllerDemandLive(source.store)
+			results[i] = legResult{rows: rows, err: err}
+		}(i, source)
+	}
+	wg.Wait()
 
 	var workBeads []beads.Bead
 	var workStores []beads.Store
 	var workStoreRefs []string
 	var partial bool
 	seen := make(map[storeScopedBeadKey]struct{})
-	for _, source := range stores {
+	for i, source := range stores {
 		if source.store == nil {
 			continue
 		}
 		storeRef := source.ref
-		// Live so the backing store's raw --status=open filter excludes blocked/
-		// deferred work: this unassigned-routed set feeds openControlDispatcherDemand
-		// and the route-repair passes, and mapBdStatus would otherwise collapse a
-		// blocked bead to "open" and let it count as spawn capacity or get its route
-		// re-stamped (EB-42o8/gc-nz5i; extends gc-4zb/#4395). See listOpenForControllerDemandLive.
-		open, err := listOpenForControllerDemandLive(source.store)
+		open, err := results[i].rows, results[i].err
 		if err != nil {
 			// A failed live demand read must NOT read as zero demand: the only
 			// demand signal this set feeds is openControlDispatcherDemand (its

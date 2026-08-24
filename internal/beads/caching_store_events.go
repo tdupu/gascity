@@ -235,6 +235,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 	case "bead.updated":
 		existing, cached := c.beads[b.ID]
+		// Read before absorb: dependents' readiness turns on this row's status,
+		// so only a real transition may invalidate their projection.
+		statusChanged := !cached || existing.Status != b.Status
 		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
 			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
@@ -248,7 +251,10 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			c.noteMutationLocked(b.ID)
 			mutated = true
 		}
-		if hasCacheEventField(fields, "status") && c.clearDependentReadyProjectionsLocked(b.ID) {
+		// Gating on the field's PRESENCE re-entered the reconcile loop: the
+		// emitter always carries status, and clearing nils is_blocked (ga-fnmb5).
+		if statusChanged && hasCacheEventField(fields, "status") &&
+			c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
 		}
 	case "bead.closed":
@@ -707,13 +713,13 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	// step_id is the semantic native execution step carried explicitly by the
 	// lifecycle bead. Non-work beads (sessions, mail, …) carry none → omitted.
 	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
-	c.onChange(eventType, b.ID, runID, sessionID, stepID, nativeStepDependencies(b.Metadata, stepID), payload)
+	c.onChange(eventType, b.ID, runID, sessionID, stepID, NativeStepDependencies(b.Metadata, stepID), payload)
 }
 
-// nativeStepDependencies returns the explicit, canonical native topology fact.
+// NativeStepDependencies returns the explicit, canonical native topology fact.
 // It never derives edges from physical bead dependencies or other mutable state:
 // absent/malformed metadata is UNKNOWN (nil), while a canonical [] is a known root.
-func nativeStepDependencies(metadata map[string]string, stepID string) *[]string {
+func NativeStepDependencies(metadata map[string]string, stepID string) *[]string {
 	if !validTopologyStepID(stepID) {
 		return nil
 	}
