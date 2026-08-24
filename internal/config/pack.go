@@ -3050,8 +3050,29 @@ func isIgnoredPackRuntimePath(path string) bool {
 	// monorepo roots, opening tens of thousands of files into the
 	// supervisor every dirty reload (gastownhall/gascity#2954). Matches
 	// the existing __pycache__ precedent for Python ecosystems.
-	for _, part := range parts {
-		if part == "__pycache__" || part == "node_modules" {
+	//
+	// Agent worktrees are skipped for the same reason: every entry under
+	// .claude/worktrees is a FULL CHECKOUT of the pack tree, so a repo with
+	// N agent worktrees multiplies the walk by N+1 while hashing content
+	// that cannot affect the running city. Measured on one deployment:
+	// 6,424 files hashed dropping to 871 once worktrees were excluded --
+	// 86% of every walk, 88MB down to about 1MB. There the startup walk
+	// grew past the bead-store init deadline, so the city did not merely
+	// start slowly, it could not start at all and retried the identical
+	// doomed walk indefinitely.
+	//
+	// Scoped deliberately to .claude/worktrees rather than all of .claude:
+	// .claude/skills is real pack content in some checkout layouts (one
+	// canonical mathcity checkout carries 114 skills there). Skipping the
+	// whole directory would drop those from the hash SILENTLY -- edit a
+	// skill, the hash would not change, the pack would not read as dirty,
+	// and agents would keep loading the stale skill with nothing reporting
+	// an error. The few bytes saved are not worth that failure mode.
+	for i, part := range parts {
+		if part == "__pycache__" || part == "node_modules" || part == ".pytest_cache" {
+			return true
+		}
+		if part == ".claude" && i+1 < len(parts) && parts[i+1] == "worktrees" {
 			return true
 		}
 	}
