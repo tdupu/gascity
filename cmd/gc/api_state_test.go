@@ -2092,7 +2092,7 @@ func TestControllerStateEmitsCompletedFromAuthoritativeGraphStepClose(t *testing
 	}
 }
 
-func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *testing.T) {
+func TestControllerStateReconcileExecutionCompletionsRepairsCompletedCloseAfterRestart(t *testing.T) {
 	backing := beads.NewMemStore()
 	root, err := backing.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
 		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
@@ -2119,8 +2119,9 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	}
 
 	// The close is already in the authoritative journal when this controller
-	// starts. Its watcher cursor begins at that journal head, reproducing a
-	// process crash after bead.closed but before step_completed was recorded.
+	// starts, reproducing a process crash after bead.closed but before
+	// step_completed was recorded. The direct reconciler remains the repair
+	// primitive; watcher startup must not run this full scan synchronously.
 	ep := events.NewFake()
 	ep.Record(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
 	prevCityStore := newControllerStateOpenCityStore
@@ -2131,7 +2132,7 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
-	cs.startBeadEventWatcher(ctx)
+	cs.reconcileExecutionCompletions()
 
 	got, listErr := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
 	if listErr != nil {
@@ -2142,6 +2143,57 @@ func TestControllerStateBeadEventWatcherReconcilesCompletedCloseAfterRestart(t *
 	}
 	if got[0].RunID != root.ID || got[0].SessionID != "gcs-session" || got[0].StepID != "build" {
 		t.Fatalf("reconciled completed event = %#v", got[0])
+	}
+}
+
+type blockingCompletionReconcileStore struct {
+	beads.Store
+	once    sync.Once
+	called  chan struct{}
+	release <-chan struct{}
+}
+
+func (s *blockingCompletionReconcileStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if filters["gc.kind"] == "workflow" {
+		s.once.Do(func() { close(s.called) })
+		<-s.release
+	}
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+func TestControllerStateBeadEventWatcherDoesNotRunFullCompletionSweepSynchronously(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	backing := &blockingCompletionReconcileStore{
+		Store:   beads.NewMemStore(),
+		called:  make(chan struct{}),
+		release: release,
+	}
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: backing}, nil
+	}
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevCityStore })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), events.NewFake(), "test-city", t.TempDir())
+
+	returned := make(chan struct{})
+	go func() {
+		cs.startBeadEventWatcher(ctx)
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("startBeadEventWatcher blocked on full completion reconciliation")
+	}
+	select {
+	case <-backing.called:
+		t.Fatal("startBeadEventWatcher ran a full completion reconciliation synchronously")
+	default:
 	}
 }
 

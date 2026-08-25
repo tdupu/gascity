@@ -314,3 +314,50 @@ func TestResolveTemplateWithholdsControllerTokenFromConfigAuthoredEnv(t *testing
 		}
 	}
 }
+
+func TestResolveTemplateSessionBackendEnvUsesLoadedConfigForHostedCredentialSelection(t *testing.T) {
+	t.Setenv("GC_DOLT_CRED_CMD", "")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+	providerArgv := `["/opt/gasworks","credential-provider"]`
+	t.Setenv(registryCredentialProviderEnv, providerArgv)
+	wantBridge := stubHostedBeadsCredentialExecutable(t, "/opt/current gc/bin/gc")
+
+	cityPath := writeHostedBeadsCity(t, "https://beads.example", "gasworks", false)
+	writeCompleteStorageBinding(t, cityPath)
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	if !configSelectsHostedBeadsCredentialProvider(cfg) {
+		t.Fatal("test config should select hosted Beads credential provider")
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		city:       cfg,
+		cityName:   "hosted-provider-test",
+		cityPath:   cityPath,
+		workspace:  &cfg.Workspace,
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		rigs:       cfg.Rigs,
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{Name: "runner", Provider: "test"}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got := tp.Env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != wantBridge {
+		t.Fatalf("credential command = %q, want %q", got, wantBridge)
+	}
+	if got := tp.Env[registryCredentialProviderEnv]; got != providerArgv {
+		t.Fatalf("%s = %q, want %q", registryCredentialProviderEnv, got, providerArgv)
+	}
+}

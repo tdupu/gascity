@@ -2683,6 +2683,33 @@ func TestStartupSessionComputationsDoNotQueryBeadStore(t *testing.T) {
 	}
 }
 
+func TestStartupPoolDeathHandlerEnvUsesLoadedConfig(t *testing.T) {
+	cityPath, _, cfg := newControllerProbeFixture(t)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace\n"), 0o600); err != nil {
+		t.Fatalf("write invalid city.toml: %v", err)
+	}
+
+	cfg.Workspace.Name = "my-city"
+	cfg.Agents[0] = config.Agent{
+		Name:              "worker",
+		Dir:               "demo",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(2),
+		OnDeath:           "echo death",
+	}
+
+	var stderr bytes.Buffer
+	handlers := computePoolDeathHandlers(cfg, "my-city", cityPath, runtime.NewFake(), &stderr)
+	if len(handlers) != 2 {
+		t.Fatalf("computePoolDeathHandlers() returned %d handlers, want 2; stderr=%q", len(handlers), stderr.String())
+	}
+	for sessionName, info := range handlers {
+		if got := info.Env["GC_RIG"]; got != "demo" {
+			t.Fatalf("%s GC_RIG = %q, want demo", sessionName, got)
+		}
+	}
+}
+
 // confirmCrossCitySupervisorImpact tests
 //
 // These tests verify the warn-and-confirm guard added to prevent
