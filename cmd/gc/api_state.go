@@ -491,10 +491,12 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 		return
 	}
 	// A controller can crash after the durable bead.closed journal append but
-	// before its best-effort lifecycle append. The normal watcher intentionally
-	// begins at the boot-time journal head, so reconcile closed graph.v2 steps
-	// before tailing to repair that otherwise permanent gap.
-	cs.reconcileExecutionCompletions()
+	// before its best-effort lifecycle append. The full historical repair is
+	// deliberately not run here: this watcher is on the supervisor publication
+	// path, and a whole-corpus graph scan can keep a large city below readiness
+	// for many minutes. CityRuntime starts the chunked completions sweep lane
+	// after the controller is armed, so historical gaps still converge without
+	// blocking launch.
 	seq := cs.beadEventStartSeq
 	// A captured seq of 0 with OK=true means the log was genuinely empty at
 	// construction — Watch(0) then replays exactly the prime-window events and
