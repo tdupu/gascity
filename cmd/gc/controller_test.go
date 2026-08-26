@@ -881,6 +881,44 @@ func TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir(t *testing.T)
 	}
 }
 
+func TestShouldIgnoreConfigWatchEvent_SkipsGitAndWorktrees(t *testing.T) {
+	sep := string(filepath.Separator)
+	root := sep + "Users" + sep + "x" + sep + "repos" + sep + "mathcity"
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		// .git: the metadata tree is the single biggest descriptor term on a git
+		// checkout and holds no config; skip it exactly (component match only).
+		{".git dir itself", root + sep + ".git", true},
+		{"file under .git", root + sep + ".git" + sep + "objects" + sep + "ab" + sep + "cdef", true},
+		{".git as bare relative path", ".git", true},
+		// .claude/worktrees: each agent worktree is a full checkout of the pack
+		// tree, so recursively watching it multiplies the descriptor cost by the
+		// worktree count. Skip the subtree, scoped exactly as pack-hash 269c19cac.
+		{".claude/worktrees dir itself", root + sep + ".claude" + sep + "worktrees", true},
+		{"file deep under .claude/worktrees", root + sep + ".claude" + sep + "worktrees" + sep + "quimby" + sep + "skills" + sep + "x.md", true},
+		// GUARD (the one that matters): .claude/skills is real watched pack
+		// content and must NOT be swept up by an over-broad ".claude" match.
+		{".claude/skills stays watched", root + sep + ".claude" + sep + "skills" + sep + "mathcity.mayor" + sep + "SKILL.md", false},
+		{".claude root stays watched", root + sep + ".claude", false},
+		// GUARD: only the exact ".git" component matches, never a lookalike.
+		{".gitignore stays watched", root + sep + ".gitignore", false},
+		{"repo dir named foo.git stays watched", root + sep + "foo.git" + sep + "config.toml", false},
+		// Existing terms still skipped (regression guard).
+		{".gc still skipped", root + sep + ".gc" + sep + "state", true},
+		{".beads still skipped", root + sep + ".beads" + sep + "issues.jsonl", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldIgnoreConfigWatchEvent(tc.path); got != tc.want {
+				t.Fatalf("shouldIgnoreConfigWatchEvent(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
