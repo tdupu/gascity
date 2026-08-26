@@ -7711,6 +7711,93 @@ func TestJsonlExportCountsRecordsViaJq(t *testing.T) {
 	}
 }
 
+func TestJsonlExportGzipsOversizedExportOverCap(t *testing.T) {
+	// A store whose issues export exceeds GitHub's 100 MiB per-file cap (hq in
+	// production, ~109 MB) wedges every push and deadlocks the archive. The
+	// exporter gzips ONLY over-cap exports at write time so no committed blob
+	// exceeds the cap; smaller stores stay uncompressed for git delta. The
+	// threshold is lowered here to exercise the path without a 100 MiB fixture.
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_GZIP_OVER_BYTES"] = "10" // tiny: forces the 5-record export "over cap"
+
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	// The over-cap subdir export is committed gzipped, not raw.
+	gzPath := filepath.Join(archiveRepo, "beads", "issues.jsonl.gz")
+	if _, err := os.Stat(gzPath); err != nil {
+		t.Fatalf("expected gzipped export beads/issues.jsonl.gz: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(archiveRepo, "beads", "issues.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("raw beads/issues.jsonl should be gone after gzip; stat err=%v", err)
+	}
+	// The legacy flat mirror is likewise gzipped.
+	if _, err := os.Stat(filepath.Join(archiveRepo, "beads.jsonl.gz")); err != nil {
+		t.Fatalf("expected gzipped flat mirror beads.jsonl.gz: %v", err)
+	}
+	// It decompresses to the 5 exported rows (data preserved through gzip).
+	if got := countIDsInGzip(t, gzPath); got != 5 {
+		t.Fatalf("gzipped export should decompress to 5 rows, got %d", got)
+	}
+	// .gitattributes marks the gz binary so git does not attempt text handling.
+	attr, err := os.ReadFile(filepath.Join(archiveRepo, ".gitattributes"))
+	if err != nil || !strings.Contains(string(attr), "*.jsonl.gz binary") {
+		t.Fatalf(".gitattributes should mark *.jsonl.gz binary; content=%q err=%v", string(attr), err)
+	}
+	// The gz is committed; the raw over-cap export is not tracked.
+	tracked := gitTrackedFiles(t, archiveRepo)
+	if !contains(tracked, "beads/issues.jsonl.gz") {
+		t.Fatalf("beads/issues.jsonl.gz should be tracked; tracked:\n%s", strings.Join(tracked, "\n"))
+	}
+	for _, f := range tracked {
+		if f == "beads/issues.jsonl" || f == "beads.jsonl" {
+			t.Fatalf("raw over-cap export %q should not be tracked; tracked:\n%s", f, strings.Join(tracked, "\n"))
+		}
+	}
+}
+
+func countIDsInGzip(t *testing.T, path string) int {
+	t.Helper()
+	out, err := exec.Command("gzip", "-dc", path).Output()
+	if err != nil {
+		t.Fatalf("gunzip %s: %v", path, err)
+	}
+	return strings.Count(string(out), `"id":`)
+}
+
+func gitTrackedFiles(t *testing.T, repo string) []string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repo, "ls-files").Output()
+	if err != nil {
+		t.Fatalf("git ls-files: %v", err)
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	return files
+}
+
+func contains(files []string, want string) bool {
+	for _, f := range files {
+		if f == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestJsonlExportSkipsSpikeCheckBelowMinPrev(t *testing.T) {
 	// Bug 2 (#1547): percent-delta with no absolute floor escalates on tiny
 	// counts. prev=2, current=1 → 50% delta would cross the 20% threshold.
