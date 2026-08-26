@@ -194,8 +194,10 @@ var startVerboseMode bool
 // only way to give the readiness wait a hard deadline. Left unset, the wait
 // is unbounded (see resolveSupervisorCityStartWait) -- a large city can
 // legitimately take far longer to boot than any constant chosen in advance.
-var startTimeoutFlag time.Duration
-var startTimeoutFlagSet bool
+var (
+	startTimeoutFlag    time.Duration
+	startTimeoutFlagSet bool
+)
 
 // buildIdleTracker creates an idleTracker from the config, populating
 // timeouts for agents that have idle_timeout set. Returns nil if no
