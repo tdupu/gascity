@@ -731,6 +731,70 @@ discard_staged_archive_outputs() {
     done
 }
 
+# GitHub blocks any blob over 100 MiB, so a store whose issues export crosses
+# that (hq in production, ~109 MB) wedges every push and the archive deadlocks.
+# Compress ONLY over-cap exports at write time: smaller stores stay uncompressed
+# so git can still delta their small per-cycle changes across commits (a gzipped
+# blob re-stores in full on every change and does not delta). No automated
+# consumer reads these exports — Dolt is the restore source of truth
+# (internal/beads/contract/files.go: "Managed cities never consume issues.jsonl")
+# — so compressing them is interface-safe. Do NOT "simplify" this to gzip every
+# file: that would trade the one-time per-file win for permanent history bloat.
+JSONL_GZIP_OVER_BYTES="${GC_JSONL_GZIP_OVER_BYTES:-99614720}"  # 95 MiB, under GitHub's 100 MiB cap
+
+# compress_oversized_exports gzips any staged .jsonl export larger than
+# JSONL_GZIP_OVER_BYTES, in place, and appends the resulting .gz paths (plus a
+# .gitattributes marking them binary) to STAGE_PATHS. The removed .jsonl entries
+# stay in STAGE_PATHS so `git add -A` records their deletion. Covers both the
+# per-db subdir export ($DB/issues.jsonl) and the legacy flat mirror ($DB.jsonl).
+compress_oversized_exports() {
+    local p f rel sz
+    local -a extra=()
+    local marked=0
+
+    for p in "${STAGE_PATHS[@]}"; do
+        if [ -d "$ARCHIVE_REPO/$p" ]; then
+            f="$ARCHIVE_REPO/$p/issues.jsonl"
+        else
+            f="$ARCHIVE_REPO/$p"
+        fi
+        [ -f "$f" ] || continue
+        case "$f" in
+            *.jsonl) ;;
+            *) continue ;;
+        esac
+        sz=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+        case "$sz" in ''|*[!0-9]*) continue ;; esac
+        if [ "$sz" -gt "$JSONL_GZIP_OVER_BYTES" ]; then
+            if gzip -9 -f "$f"; then
+                rel="${f#"$ARCHIVE_REPO"/}"
+                extra+=("$rel.gz")
+                marked=1
+            else
+                echo "jsonl-export: gzip of over-cap export $f failed; leaving uncompressed" >&2
+            fi
+        fi
+    done
+
+    if [ "$marked" -eq 1 ]; then
+        if ! grep -qsF '*.jsonl.gz binary' "$ARCHIVE_REPO/.gitattributes" 2>/dev/null; then
+            printf '%s\n' '*.jsonl.gz binary -diff -text' >> "$ARCHIVE_REPO/.gitattributes"
+        fi
+        # A flat export we just gzipped no longer exists at its .jsonl path. Keep
+        # that stale entry ONLY if it is tracked in HEAD (so its deletion still
+        # stages on the uncompressed->gzipped transition); drop it otherwise, or
+        # `git add -A -- <path>` fails on a pathspec matching nothing (first run).
+        local -a kept=()
+        for p in "${STAGE_PATHS[@]}"; do
+            if [ -e "$ARCHIVE_REPO/$p" ] \
+                || git -C "$ARCHIVE_REPO" ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
+                kept+=("$p")
+            fi
+        done
+        STAGE_PATHS=("${kept[@]}" ".gitattributes" "${extra[@]}")
+    fi
+}
+
 # State file for tracking consecutive push failures.
 STATE_FILE="$PACK_STATE_DIR/jsonl-export-state.json"
 LEGACY_PACK_STATE_FILE="$LEGACY_PACK_STATE_DIR/jsonl-export-state.json"
@@ -995,6 +1059,10 @@ while IFS= read -r DB; do
     PREV_COUNT=0
     if git -C "$ARCHIVE_REPO" cat-file -e "HEAD:$DB/issues.jsonl" 2>/dev/null; then
         PREV_COUNT=$(git -C "$ARCHIVE_REPO" show "HEAD:$DB/issues.jsonl" 2>/dev/null | count_jsonl_rows || echo "0")
+    elif git -C "$ARCHIVE_REPO" cat-file -e "HEAD:$DB/issues.jsonl.gz" 2>/dev/null; then
+        # Over-cap stores are committed gzipped (compress_oversized_exports); read
+        # the previous count through gunzip so spike detection still works for them.
+        PREV_COUNT=$(git -C "$ARCHIVE_REPO" show "HEAD:$DB/issues.jsonl.gz" 2>/dev/null | gzip -dc 2>/dev/null | count_jsonl_rows || echo "0")
     fi
 
     # Skip the percentage check on the first run (no prior commit) and when
@@ -1023,6 +1091,11 @@ $DATABASES
 EOF
 
 cd "$ARCHIVE_REPO"
+# Gzip any over-cap export before staging so no committed blob exceeds GitHub's
+# 100 MiB per-file limit (both the normal and HALT commit paths stage here).
+if [ "${#STAGE_PATHS[@]}" -gt 0 ]; then
+    compress_oversized_exports
+fi
 if [ "${#STAGE_PATHS[@]}" -gt 0 ]; then
     if ! git add -A -- "${STAGE_PATHS[@]}"; then
         discard_staged_archive_outputs
