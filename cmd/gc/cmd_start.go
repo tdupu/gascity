@@ -190,6 +190,13 @@ var noAutoRestartMode bool
 // startVerboseMode disables gc start warning deduplication.
 var startVerboseMode bool
 
+// startTimeoutFlag/startTimeoutFlagSet back gc start's --timeout flag: the
+// only way to give the readiness wait a hard deadline. Left unset, the wait
+// is unbounded (see resolveSupervisorCityStartWait) -- a large city can
+// legitimately take far longer to boot than any constant chosen in advance.
+var startTimeoutFlag time.Duration
+var startTimeoutFlagSet bool
+
 // buildIdleTracker creates an idleTracker from the config, populating
 // timeouts for agents that have idle_timeout set. Returns nil if no
 // agents use idle timeout (disabled).
@@ -462,6 +469,14 @@ Use "gc supervisor run" for foreground operation.`,
 	cmd.Flags().BoolVar(&startVerboseMode, "verbose", false,
 		"disable warning deduplication and print every supervisor warning")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
+	cmd.Flags().DurationVar(&startTimeoutFlag, "timeout", 0,
+		"maximum time to wait for the city to become ready under the supervisor (default: unbounded -- gc start waits and prints progress until the city is ready or the supervisor reports failure)")
+	startTimeoutFlagSet = false
+	originalRunE := cmd.RunE
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		startTimeoutFlagSet = c.Flags().Changed("timeout")
+		return originalRunE(c, args)
+	}
 	return cmd
 }
 
@@ -980,10 +995,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// arm (collectAssignedWorkBeadsWithStores / cold-wake scale-check probes) — a dual
 	// role the daemon routes to the session store today too, tracked as a shared E2
 	// two-store split. Identity to oneShotStore at the single-store backend, so
-	// byte-identical today. releaseOrphanedPoolAssignmentsWhenSnapshotsComplete keeps
-	// the plain oneShotStore, matching the daemon's cityBeadStore() there (its lone
-	// liveOpenSessionAssignmentExists session read is a shared work-release-boundary
-	// follow-up).
+	// byte-identical today. releaseOrphanedPoolAssignmentsWhenSnapshotsComplete takes
+	// both: oneShotStore as the work-class owner fallback and sessStore for its lone
+	// liveOpenSessionAssignmentExists session read (ga-g3pf0).
 	sessStore := cliSessionStore(oneShotStore, cfg, cityPath)
 
 	// One-shot bead reconciliation: same code path as the daemon.
@@ -1002,7 +1016,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
 	)
 
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}

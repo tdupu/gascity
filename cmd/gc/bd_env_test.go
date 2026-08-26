@@ -240,6 +240,40 @@ func TestControlBdCommandRunnerForCityBoundCitySkipsManagedRecovery(t *testing.T
 	probe.assertNoManagedRecovery(t, err)
 }
 
+func TestBdCommandRunnerForCityUsesLoadedConfigForHostedRunnerSelection(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o600); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
+	var captured map[string]string
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		captured = cloneStringMap(env)
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			return []byte("ok"), nil
+		}
+	}
+
+	runner := bdCommandRunnerForCity(cityPath)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace\n"), 0o600); err != nil {
+		t.Fatalf("write invalid city.toml: %v", err)
+	}
+
+	out, err := runner(cityPath, "bd", "list", "--json")
+	if err != nil {
+		t.Fatalf("runner error = %v, want nil from stubbed runner", err)
+	}
+	if string(out) != "ok" {
+		t.Fatalf("runner output = %q, want stubbed output", out)
+	}
+	if got := captured["BEADS_DIR"]; got != filepath.Join(cityPath, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want city scope .beads", got)
+	}
+}
+
 // TestBdCommandRunnerForRigBoundScopeSkipsManagedRecovery covers both ways a
 // rig ends up on a store gc does not manage: its own binding, and the city's
 // binding inherited.

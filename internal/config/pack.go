@@ -170,7 +170,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		var rigImportPackDirs []string
 		var rigGlobals []ResolvedPackGlobal
 		for _, ref := range topoRefs {
-			topoDir, err := resolvePackRef(ref, cityRoot, cityRoot)
+			topoDir, err := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 			if err != nil {
 				return fmt.Errorf("rig %q pack %q: %w", rig.Name, ref, err)
 			}
@@ -297,7 +297,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					continue
 				}
 
-				impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot)
+				impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
@@ -615,7 +615,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 	cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 
 	for _, ref := range topos {
-		topoDir, err := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, err := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 		if err != nil {
 			// Pack directory may have been removed upstream (e.g. renamed/deleted
 			// in the remote repo). Skip gracefully so the rest of the city loads.
@@ -742,7 +742,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			// Unlike V1 includes (which skip gracefully for missing remote
 			// subpaths), V2 imports are always fatal on missing source.
 			// A typo in [imports.X].source should not be silently ignored.
-			impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot)
+			impDir, err := resolveImportPackRef(imp.Source, imp.Version, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
@@ -1011,10 +1011,10 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 // declaredVersion is the import's declared version constraint; it gates the
 // no-lock bundled fallback so a declared non-canonical pin never silently
 // composes the binary's embedded content.
-func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string) (string, error) {
+func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string, nonBlocking bool) (string, error) {
 	if isGitHubTreeURL(ref) {
 		_, subpath, _ := parseGitHubTreeURL(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot)
+		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot, nonBlocking)
 		if err != nil {
 			return "", err
 		}
@@ -1025,7 +1025,7 @@ func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string) (strin
 	}
 	if isRemoteInclude(ref) {
 		_, subpath, _ := parseRemoteInclude(ref)
-		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot)
+		cacheDir, err := resolveInstalledRemoteImport(ref, declaredVersion, cityRoot, nonBlocking)
 		if err != nil {
 			return "", err
 		}
@@ -1034,7 +1034,7 @@ func resolveImportPackRef(ref, declaredVersion, declDir, cityRoot string) (strin
 		}
 		return cacheDir, nil
 	}
-	return resolvePackRef(ref, declDir, cityRoot)
+	return resolvePackRef(ref, declDir, cityRoot, nonBlocking)
 }
 
 // ComputeFormulaLayers builds the FormulaLayers from the resolved formula
@@ -1243,7 +1243,7 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 	var topoDirs []string
 	var requirements []PackRequirement
 	var globals []ResolvedPackGlobal
-	err := withRepoCacheReadLockForPath(topoDir, func() error {
+	err := withRepoCacheReadLockForPath(topoDir, opts.RepoCacheNonBlocking, func() error {
 		var loadErr error
 		agents, namedSessions, providers, upstreams, services, topoDirs, requirements, globals, loadErr = loadPackWithCacheOptionsLocked(
 			fs, topoPath, topoDir, cityRoot, rigName, seen, cache, opts)
@@ -1325,7 +1325,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	includedUpstreams := make(map[string]UpstreamSpec)
 
 	for _, inc := range tc.Pack.Includes {
-		incTopoDir, err := resolvePackRef(inc, topoDir, cityRoot)
+		incTopoDir, err := resolvePackRef(inc, topoDir, cityRoot, opts.RepoCacheNonBlocking)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("include %q: %w", inc, err)
 		}
@@ -1383,7 +1383,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		// remote sources, and a bundled source at its canonical pin
 		// self-heals from the binary's embedded content when the lock is
 		// absent or lacks the entry — matching city- and rig-scope imports.
-		impDir, err := resolveImportPackRef(imp.Source, imp.Version, topoDir, cityRoot)
+		impDir, err := resolveImportPackRef(imp.Source, imp.Version, topoDir, cityRoot, opts.RepoCacheNonBlocking)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("import %q: %w", bindingName, err)
 		}
@@ -2420,27 +2420,37 @@ func adjustPackPatchPaths(patches *PackPatches, topoDir, cityRoot string) {
 // run). When Dir is set, both Dir and Name must match.
 // Returns an error if a patch targets a nonexistent agent.
 func applyPackAgentPatches(agents []Agent, patches []AgentPatch) error {
-	for i, p := range patches {
-		target := qualifiedNameFromPatch(p.Dir, p.Name)
+	for i := range patches {
+		p := &patches[i]
+		// Resolve the effective target dir through the shared helper so a
+		// rig-keyed pack patch (Rig set, Dir empty) targets its rig instead of
+		// silently degrading to a name-only match, and a dir+rig combination is
+		// rejected here rather than deferred to compose. A "*" wildcard resolves
+		// to the empty (name-only) dir — pack-scope patches don't know rig names.
+		targetDir, err := agentPatchTargetDir(p)
+		if err != nil {
+			return fmt.Errorf("patches.agent[%d]: %w", i, err)
+		}
+		target := qualifiedNameFromPatch(targetDir, p.Name)
 		found := false
 		for j := range agents {
-			if p.Dir == "" {
+			if targetDir == "" {
 				// Name-only match: pack patches don't know the rig name.
 				if agents[j].Name == p.Name {
-					applyAgentPatchFields(&agents[j], &patches[i])
+					applyAgentPatchFields(&agents[j], p)
 					found = true
 					break
 				}
 			} else {
-				if agents[j].Dir == p.Dir && agents[j].Name == p.Name {
-					applyAgentPatchFields(&agents[j], &patches[i])
+				if agents[j].Dir == targetDir && agents[j].Name == p.Name {
+					applyAgentPatchFields(&agents[j], p)
 					found = true
 					break
 				}
 			}
 		}
 		if !found {
-			if p.Dir == "" {
+			if targetDir == "" {
 				for j := range agents {
 					if agents[j].BindingQualifiedName() == p.Name {
 						return fmt.Errorf("patches.agent[%d]: agent %q not found in pack (patches match local names — did you mean %q?)", i, target, agents[j].Name)
@@ -2945,6 +2955,14 @@ func ResetPackContentHashCache() {
 // by a cheap stat fingerprint, so an unchanged tree is hashed once and reused
 // across calls and reconcile ticks; see packContentHashCache.
 func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
+	return packContentHashRecursive(fs, topoDir, true)
+}
+
+// packContentHashRecursive computes a pack hash, optionally using the
+// stat-fingerprint cache. Revision snapshots must use fresh content reads so
+// edits that preserve file size and coarse-grained mtimes cannot return a
+// stale revision.
+func packContentHashRecursive(fs fsys.FS, topoDir string, useCache bool) string {
 	var paths []string
 	collectFiles(fs, topoDir, "", &paths)
 	sort.Strings(paths)
@@ -2963,9 +2981,11 @@ func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 		}
 	}
 	fpSum := fp.Sum64()
-	if v, ok := packContentHashCache.Load(absDir); ok {
-		if entry := v.(packContentHashEntry); entry.fingerprint == fpSum {
-			return entry.hash
+	if useCache {
+		if v, ok := packContentHashCache.Load(absDir); ok {
+			if entry := v.(packContentHashEntry); entry.fingerprint == fpSum {
+				return entry.hash
+			}
 		}
 	}
 
@@ -2981,7 +3001,9 @@ func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 		h.Write([]byte{0})       //nolint:errcheck // hash.Write never errors
 	}
 	result := fmt.Sprintf("%x", h.Sum(nil))
-	packContentHashCache.Store(absDir, packContentHashEntry{fingerprint: fpSum, hash: result})
+	if useCache {
+		packContentHashCache.Store(absDir, packContentHashEntry{fingerprint: fpSum, hash: result})
+	}
 	return result
 }
 
@@ -3028,8 +3050,29 @@ func isIgnoredPackRuntimePath(path string) bool {
 	// monorepo roots, opening tens of thousands of files into the
 	// supervisor every dirty reload (gastownhall/gascity#2954). Matches
 	// the existing __pycache__ precedent for Python ecosystems.
-	for _, part := range parts {
-		if part == "__pycache__" || part == "node_modules" {
+	//
+	// Agent worktrees are skipped for the same reason: every entry under
+	// .claude/worktrees is a FULL CHECKOUT of the pack tree, so a repo with
+	// N agent worktrees multiplies the walk by N+1 while hashing content
+	// that cannot affect the running city. Measured on one deployment:
+	// 6,424 files hashed dropping to 871 once worktrees were excluded --
+	// 86% of every walk, 88MB down to about 1MB. There the startup walk
+	// grew past the bead-store init deadline, so the city did not merely
+	// start slowly, it could not start at all and retried the identical
+	// doomed walk indefinitely.
+	//
+	// Scoped deliberately to .claude/worktrees rather than all of .claude:
+	// .claude/skills is real pack content in some checkout layouts (one
+	// canonical mathcity checkout carries 114 skills there). Skipping the
+	// whole directory would drop those from the hash SILENTLY -- edit a
+	// skill, the hash would not change, the pack would not read as dirty,
+	// and agents would keep loading the stale skill with nothing reporting
+	// an error. The few bytes saved are not worth that failure mode.
+	for i, part := range parts {
+		if part == "__pycache__" || part == "node_modules" || part == ".pytest_cache" {
+			return true
+		}
+		if part == ".claude" && i+1 < len(parts) && parts[i+1] == "worktrees" {
 			return true
 		}
 	}
@@ -3067,7 +3110,7 @@ func resolveNamedPacks(cfg *City, cityRoot string) {
 // defines a rig-scoped agent with the given name. Returns false on error
 // (fail-open: caller should add the default polecat).
 func PackDefinesAgent(fs fsys.FS, packRef, cityRoot, agentName string) bool {
-	topoDir, err := resolvePackRef(packRef, cityRoot, cityRoot)
+	topoDir, err := resolvePackRef(packRef, cityRoot, cityRoot, false)
 	if err != nil {
 		return false
 	}
@@ -3135,7 +3178,7 @@ func PackSummary(cfg *City, fs fsys.FS, cityRoot string) map[string]string {
 
 // packSummaryOne builds a summary string for a single pack reference.
 func packSummaryOne(fs fsys.FS, ref, cityRoot string) string {
-	topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+	topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 	topoPath := filepath.Join(topoDir, packFile)
 	data, err := fs.ReadFile(topoPath)
 	if err != nil {

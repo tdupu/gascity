@@ -29,13 +29,13 @@ func controllerQueryRuntimeEnv(cityPath string, cfg *config.City, agentCfg *conf
 			if !scopeUsesManagedBdStoreContract(cityPath, cityPath) {
 				return nil, nil
 			}
-			source, err = bdRuntimeEnvWithError(cityPath)
+			source, err = bdRuntimeEnvWithErrorForConfig(cityPath, cfg)
 		}
 	} else {
 		if !scopeUsesManagedBdStoreContract(cityPath, cityPath) {
 			return nil, nil
 		}
-		source, err = bdRuntimeEnvWithError(cityPath)
+		source, err = bdRuntimeEnvWithErrorForConfig(cityPath, cfg)
 	}
 	if err != nil {
 		return nil, err

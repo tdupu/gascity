@@ -841,8 +841,12 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 	if !jsonOut {
 		fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
 	}
-	unloadSupervisorService()
+	serviceErr := unloadSupervisorServiceHook()
 	if !wait {
+		if serviceErr != nil {
+			fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+			return 1
+		}
 		if jsonOut {
 			return writeSupervisorStopSuccess(stdout, stderr, wait)
 		}
@@ -867,6 +871,10 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 			// budget — the server already told us shutdown finished.
 			if err := waitForSupervisorExitUntil(sockPath, time.Now().Add(5*time.Second)); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			if serviceErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
 				return 1
 			}
 			if jsonOut {
@@ -897,6 +905,10 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 
 	if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if serviceErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
 		return 1
 	}
 	if jsonOut {
@@ -1033,6 +1045,8 @@ func reloadSupervisor(stdout, stderr io.Writer) int {
 	return reloadSupervisorJSON(stdout, stderr, false)
 }
 
+const supervisorReloadReconcileTimeoutMessage = "gc supervisor reload: reconcile did not finish before timeout"
+
 func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
@@ -1065,7 +1079,7 @@ func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		fmt.Fprintln(stderr, "gc supervisor reload: reconcile queue is busy; try again shortly") //nolint:errcheck
 		return 1
 	case "timeout":
-		fmt.Fprintln(stderr, "gc supervisor reload: reconcile did not finish before timeout") //nolint:errcheck
+		fmt.Fprintln(stderr, supervisorReloadReconcileTimeoutMessage) //nolint:errcheck
 		return 1
 	}
 	fmt.Fprintln(stderr, "gc supervisor reload: supervisor not responding (may be shutting down); try 'gc supervisor start'") //nolint:errcheck
@@ -2190,7 +2204,19 @@ func reconcileCities(
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {
-			runPoolOnBoot(cfg, path, shellRunHook, stderr)
+			runPoolOnBootWithProgress(cfg, path, shellRunHook, stderr, func(current, total int, agent string) {
+				cr.BatchUpdate(func(
+					_ map[string]*managedCity,
+					initStatus map[string]cityInitProgress,
+					_ map[string]*initFailRecord,
+					_ map[string]*panicRecord,
+				) {
+					initStatus[path] = cityInitProgress{
+						name:   cityName,
+						status: fmt.Sprintf("running_pool_on_boot:%d/%d:%s", current, total, agent),
+					}
+				})
+			})
 			return nil
 		}); err != nil {
 			// Same as the controller-state branch above: the runtime is built,

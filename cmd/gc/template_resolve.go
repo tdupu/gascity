@@ -117,6 +117,13 @@ type TemplateParams struct {
 	// pool_slot metadata without reverse-engineering the slot from the name
 	// (which fails for namepool-themed instances like "fenrir").
 	PoolSlot int
+	// BoundStepID is the work-step bead ID bound to this named/direct
+	// session, resolved during buildDesiredState from the assigned-work-bead
+	// match (namedWorkBeadID). Empty when a named session has no concrete
+	// bound step (e.g. always-mode sessions awake on default demand alone).
+	// syncSessionBeads uses this to seed gc.bound_step_id and the startup
+	// kickoff progress-binding metadata.
+	BoundStepID string
 	// EnvIdentityStamped reports whether setTemplateEnvIdentity has written
 	// an authoritative GC_ALIAS/GC_AGENT identity into Env. resolveTemplate
 	// always seeds GC_ALIAS=qualifiedName, so "Env has GC_ALIAS" is not a
@@ -314,7 +321,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+	sessionBackendEnv, err := sessionBackendEnvWithErrorForConfig(p.cityPath, p.city, rigRoot, p.rigs)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
 	}
@@ -772,6 +779,10 @@ func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
 }
 
 func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
+	return sessionBackendEnvWithErrorForConfig(cityPath, nil, rigRoot, rigs)
+}
+
+func sessionBackendEnvWithErrorForConfig(cityPath string, cfg *config.City, rigRoot string, rigs []config.Rig) (map[string]string, error) {
 	env := map[string]string{
 		// Suppress bd's built-in Dolt auto-start. The gc controller manages
 		// the server; bd's CLI auto-start launches rogue servers from the
@@ -790,7 +801,10 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
 		if cityUsesBdStoreContract(cityPath) {
-			if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
+			if err := applyHostedBeadsCredentialEnvForConfig(env, cityPath, cfg); err != nil {
+				return env, err
+			}
+			if bound, err := applyCityStorageBindingEnvForConfig(env, cityPath, cfg); err != nil {
 				// On projection errors, keep explicit empty keys so tmux
 				// clears stale inherited backend variables for the session.
 				clearProjectedDoltEnv(env)
@@ -811,6 +825,11 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 		return env, nil
 	}
 
+	if cityUsesBdStoreContract(cityPath) {
+		if err := applyHostedBeadsCredentialEnvForConfig(env, cityPath, cfg); err != nil {
+			return env, err
+		}
+	}
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
 		mirrorBeadsDoltEnv(env)
 		if !isRecoverableManagedDoltEnvError(err) {

@@ -27,8 +27,9 @@ var (
 	supervisorCityReadyTimeout = config.DefaultStartReadyTimeout
 	// supervisorCityStopTimeoutFloor preserves the historical default
 	// stop/unregister wait floor independently of start-ready sizing.
-	supervisorCityStopTimeoutFloor = 180 * time.Second
-	supervisorCityPollInterval     = 100 * time.Millisecond
+	supervisorCityStopTimeoutFloor  = 180 * time.Second
+	supervisorCityPollInterval      = 100 * time.Millisecond
+	supervisorCityHeartbeatInterval = 30 * time.Second
 )
 
 // registerCityWithSupervisorTestHook lets tests intercept registration after
@@ -347,6 +348,11 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
+	if commandName == "gc start" {
+		if done, code := shortCircuitAlreadyStartingOrRunning(cityPath, nameOverride, stdout, stderr); done {
+			return code
+		}
+	}
 	// Only the registry-mutating intent commands gate interactively on
 	// cross-city impact. Operational entry points (gc start) and any future
 	// caller warn-and-proceed: the guard still prints the audit warning but
@@ -410,31 +416,41 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		keepRegisteredCity(entry, stderr, commandName, "supervisor did not start")
 		return 1
 	}
-	if reloadSupervisorHook(io.Discard, io.Discard) != 0 {
-		// The supervisor may be a zombie from a recent "gc supervisor stop" —
-		// alive enough to accept connections but unable to process reload
-		// because its main loop has exited. Poll for it to finish dying,
-		// start a fresh supervisor, and retry.
-		deadline := time.Now().Add(10 * time.Second)
-		for supervisorAliveHook() != 0 && time.Now().Before(deadline) {
-			time.Sleep(250 * time.Millisecond)
-		}
-		if ensureSupervisorRunningHook(stdout, stderr) != 0 {
-			keepRegisteredCity(entry, stderr, commandName, "supervisor did not start after retry")
-			return 1
-		}
-		if reloadSupervisorHook(stdout, stderr) != 0 {
-			keepRegisteredCity(entry, stderr, commandName, "reconcile failed")
-			return 1
+	reloadTimedOut := false
+	if code, timedOut := reloadSupervisorForStart(io.Discard, io.Discard); code != 0 {
+		if timedOut {
+			reloadTimedOut = true
+		} else {
+			// The supervisor may be a zombie from a recent "gc supervisor stop" —
+			// alive enough to accept connections but unable to process reload
+			// because its main loop has exited. Poll for it to finish dying,
+			// start a fresh supervisor, and retry.
+			deadline := time.Now().Add(10 * time.Second)
+			for supervisorAliveHook() != 0 && time.Now().Before(deadline) {
+				time.Sleep(250 * time.Millisecond)
+			}
+			if ensureSupervisorRunningHook(stdout, stderr) != 0 {
+				keepRegisteredCity(entry, stderr, commandName, "supervisor did not start after retry")
+				return 1
+			}
+			code, timedOut = reloadSupervisorForStart(stdout, stderr)
+			if code != 0 {
+				if !timedOut {
+					keepRegisteredCity(entry, stderr, commandName, "reconcile failed")
+					return 1
+				}
+				reloadTimedOut = true
+			}
 		}
 	}
-	if supervisorAliveHook() != 0 {
+	if reloadTimedOut || supervisorAliveHook() != 0 {
 		if showProgress {
 			logInitProgress(stdout, 8, "Waiting for supervisor to start city")
 		} else if stdout != nil {
 			fmt.Fprintln(stdout, "Waiting for supervisor to start city...") //nolint:errcheck // best-effort stdout
 		}
-		if err := waitForSupervisorCityHook(cityPath, true, supervisorCityStartTimeout(cityPath), stdout); err != nil {
+		waitTimeout, _ := resolveSupervisorCityStartWait(cityPath)
+		if err := waitForSupervisorCityHook(cityPath, true, waitTimeout, stdout); err != nil {
 			if retried, retriedErr := retrySupervisorCityStartAfterControllerLock(cityPath, stdout, stderr, err); retried {
 				if retriedErr == nil {
 					return 0
@@ -447,6 +463,16 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		}
 	}
 	return 0
+}
+
+func reloadSupervisorForStart(stdout, stderr io.Writer) (int, bool) {
+	var captured strings.Builder
+	reloadStderr := io.Writer(&captured)
+	if stderr != nil {
+		reloadStderr = io.MultiWriter(stderr, &captured)
+	}
+	code := reloadSupervisorHook(stdout, reloadStderr)
+	return code, strings.Contains(captured.String(), supervisorReloadReconcileTimeoutMessage)
 }
 
 // registerCityForAPI is the registry-write portion of async
@@ -512,7 +538,8 @@ func retrySupervisorCityStartAfterControllerLock(cityPath string, stdout, stderr
 	if reloadSupervisorHook(stdout, stderr) != 0 {
 		return true, fmt.Errorf("%w; reconcile retry failed", startErr)
 	}
-	if err := waitForSupervisorCityHook(cityPath, true, supervisorCityStartTimeout(cityPath), stdout); err != nil {
+	waitTimeout, _ := resolveSupervisorCityStartWait(cityPath)
+	if err := waitForSupervisorCityHook(cityPath, true, waitTimeout, stdout); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -576,7 +603,23 @@ func keepRegisteredCity(entry supervisor.CityEntry, stderr io.Writer, commandNam
 }
 
 func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Duration, stdout io.Writer) error {
-	deadline := time.Now().Add(timeout)
+	// timeout <= 0 means unbounded: the operator did not opt into a deadline
+	// (no --timeout on gc start, and no explicit daemon.start_ready_timeout),
+	// so we wait for an explicit success or failure signal from the
+	// supervisor instead of guessing a constant that is wrong for either a
+	// tiny city or an hours-long one. See #5379/#5380: a fixed deadline
+	// false-fataled a live city that was progressing normally, and a bounded
+	// stop wait restarted a city that had already stopped.
+	unbounded := wantRunning && timeout <= 0
+	start := time.Now()
+	var deadline time.Time
+	if !unbounded {
+		deadline = start.Add(timeout)
+	}
+	if unbounded && stdout != nil {
+		fmt.Fprintln(stdout, "  no readiness deadline set (pass --timeout on gc start to set one); this wait could take a long time if the city is slow to start; press Ctrl-C to abort") //nolint:errcheck // best-effort stdout
+	}
+	lastBeat := start
 	var lastStatus string
 	for {
 		running, status, known := supervisorCityRunningHook(cityPath)
@@ -587,7 +630,9 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 			return fmt.Errorf("city is still running under supervisor")
 		case known && wantRunning && status == "init_failed":
 			// If the supervisor reports an init failure, surface the
-			// error immediately instead of polling until timeout.
+			// error immediately instead of polling until timeout. This
+			// applies in both bounded and unbounded mode: an explicit
+			// failure from the supervisor is always fatal.
 			if errMsg := supervisorCityErrorHook(cityPath); errMsg != "" {
 				return fmt.Errorf("city failed to start: %s", errMsg)
 			}
@@ -597,18 +642,77 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 		case !known && supervisorAliveHook() == 0:
 			return fmt.Errorf("supervisor stopped before city became ready")
 		}
-		if stdout != nil && status != "" && status != lastStatus {
-			fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+		now := time.Now()
+		if status != "" && status != lastStatus {
 			lastStatus = status
+			if !unbounded && wantRunning {
+				deadline = now.Add(timeout)
+			}
+			if stdout != nil {
+				fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+			}
+			lastBeat = now
 		}
-		if time.Now().After(deadline) {
+		// Periodic heartbeat so a long wait -- bounded or not -- is visibly
+		// deliberate rather than an apparent hang.
+		if wantRunning && stdout != nil && lastStatus != "" &&
+			now.Sub(lastBeat) >= supervisorCityHeartbeatInterval {
+			suffix := ""
+			if unbounded {
+				suffix = " (no readiness deadline set)"
+			}
+			fmt.Fprintf(stdout, "  still waiting: %s (elapsed %s)%s\n", //nolint:errcheck // best-effort stdout
+				statusDisplayText(lastStatus), roundDurationForDisplay(now.Sub(start)), suffix)
+			lastBeat = now
+		}
+		if !unbounded && now.After(deadline) {
 			if wantRunning {
-				return fmt.Errorf("city did not become ready under supervisor within %s (increase [daemon].start_ready_timeout or [session].startup_timeout for cities with many or slow-starting sessions)", timeout)
+				msg := fmt.Sprintf("city did not become ready under supervisor within %s", timeout)
+				if lastStatus != "" {
+					msg += fmt.Sprintf("; last status: %s", lastStatus)
+				}
+				return fmt.Errorf("%s (pass --timeout on gc start to raise this, or omit it entirely to wait indefinitely)", msg)
 			}
 			return fmt.Errorf("city did not stop under supervisor")
 		}
 		time.Sleep(supervisorCityPollInterval)
 	}
+}
+
+// roundDurationForDisplay keeps operator-facing elapsed times readable at both
+// production (minutes) and test (millisecond) scales.
+func roundDurationForDisplay(d time.Duration) time.Duration {
+	if d < time.Second {
+		return d.Round(time.Millisecond)
+	}
+	return d.Round(time.Second)
+}
+
+// resolveSupervisorCityStartWait resolves the readiness-wait deadline for
+// gc start/register/init. Precedence: an explicit --timeout on gc start,
+// then an explicit daemon.start_ready_timeout in city.toml (the existing,
+// still-honored config knob -- session.startup_timeout continues to extend
+// it, per supervisorCityStartTimeout), then unbounded. A bare package
+// default with nothing explicitly configured is deliberately no longer used
+// as a hard deadline: a large city can legitimately take far longer than any
+// constant anyone picks in advance (#5379), so gc start now waits loudly
+// instead of false-fataling.
+func resolveSupervisorCityStartWait(cityPath string) (timeout time.Duration, hasDeadline bool) {
+	if startTimeoutFlagSet {
+		return startTimeoutFlag, true
+	}
+	if supervisorCityStartTimeoutExplicit(cityPath) {
+		return supervisorCityStartTimeout(cityPath), true
+	}
+	return 0, false
+}
+
+// supervisorCityStartTimeoutExplicit reports whether the operator configured
+// daemon.start_ready_timeout in city.toml -- the canonical, deliberate
+// opt-in into a start-readiness deadline (see supervisorCityStartTimeout).
+func supervisorCityStartTimeoutExplicit(cityPath string) bool {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	return err == nil && cfg.Daemon.StartReadyTimeout != ""
 }
 
 // supervisorCityError fetches the error message for a city from the supervisor API.
@@ -637,6 +741,13 @@ func supervisorCityError(cityPath string) string {
 
 // statusDisplayText maps an init status string to a human-readable display line.
 func statusDisplayText(status string) string {
+	if strings.HasPrefix(status, "running_pool_on_boot:") {
+		detail := strings.TrimPrefix(status, "running_pool_on_boot:")
+		parts := strings.SplitN(detail, ":", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return fmt.Sprintf("running_pool_on_boot %s (%s)...", parts[0], parts[1])
+		}
+	}
 	switch status {
 	case "loading_config":
 		return "Loading configuration..."
@@ -720,14 +831,30 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 			return true, 1
 		}
 		if err := waitForSupervisorCityHook(cityPath, false, supervisorCityStopTimeout(cityPath), nil); err != nil {
-			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
-				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
+			// A bounded wait that expires is not proof the stop failed. Restoring
+			// registration makes the supervisor boot the city again, which
+			// contradicts the operator's request, so only restore when the city
+			// is genuinely still running.
+			if running, _, known := supervisorCityRunningHook(cityPath); !known || !running {
+				fmt.Fprintf(stderr, "%s: %v; city is not running, keeping '%s' unregistered\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
 			} else {
-				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+				if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
+					fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+				}
+				return true, 1
 			}
-			return true, 1
 		}
 		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
+			// Same postcondition re-check as above: the controller may have
+			// exited just after the wait window closed. Treat an actually-stopped
+			// controller as success rather than restoring registration and
+			// restarting the city the operator asked to stop.
+			if pid := controllerAliveHook(cityPath); pid == 0 {
+				fmt.Fprintf(stderr, "%s: %v; controller is stopped, keeping '%s' unregistered\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
+				return true, 0
+			}
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
 				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
 			} else {
@@ -740,6 +867,9 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 }
 
 var waitForSupervisorControllerStopHook = waitForSupervisorControllerStop
+
+// controllerAliveHook lets tests drive the stop postcondition re-check.
+var controllerAliveHook = controllerAlive
 
 var waitForSupervisorCityHook = waitForSupervisorCity
 
@@ -799,4 +929,43 @@ func supervisorCityRunning(cityPath string) (running bool, status string, known 
 		}
 	}
 	return false, "", false
+}
+
+// shortCircuitAlreadyStartingOrRunning reports on, and skips straight past,
+// gc start's register/reload/wait sequence when the city is already running
+// or already mid-start under the supervisor. Without this, a second gc start
+// invoked while one is in flight re-triggers ensureSupervisorRunning and a
+// fresh supervisor reload -- redundant at best, and liable to collide with
+// the reconcile-queue-busy path (#5343) at worst.
+func shortCircuitAlreadyStartingOrRunning(cityPath, nameOverride string, stdout, stderr io.Writer) (handled bool, code int) {
+	running, status, known := supervisorCityRunningHook(cityPath)
+	if !known {
+		return false, 0
+	}
+	name, err := registeredCityName(cityPath, nameOverride)
+	if err != nil || name == "" {
+		name = cityPath
+	}
+	if running {
+		if stdout != nil {
+			fmt.Fprintf(stdout, "City '%s' is already running.\n", name) //nolint:errcheck // best-effort stdout
+		}
+		return true, 0
+	}
+	if status == "" || status == "init_failed" {
+		// Not yet known to be mid-start (fresh registration, or the
+		// supervisor already flagged a hard failure); let the normal
+		// register/reload/wait sequence run and surface it as usual.
+		return false, 0
+	}
+	if stdout != nil {
+		fmt.Fprintf(stdout, "City '%s' start is already in progress (status: %s); waiting for it to finish instead of starting a new one.\n", name, statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+	}
+	waitTimeout, _ := resolveSupervisorCityStartWait(cityPath)
+	if err := waitForSupervisorCityHook(cityPath, true, waitTimeout, stdout); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err)                               //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc start: check 'gc supervisor logs' for details") //nolint:errcheck // best-effort stderr
+		return true, 1
+	}
+	return true, 0
 }
