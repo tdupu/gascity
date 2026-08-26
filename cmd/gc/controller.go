@@ -890,14 +890,32 @@ func shouldIgnoreConfigWatchEvent(path string) bool {
 	if clean == "" || clean == "." {
 		return false
 	}
-	sepGC := string(filepath.Separator) + ".gc"
-	sepBeads := string(filepath.Separator) + ".beads"
+	sep := string(filepath.Separator)
+	sepGC := sep + ".gc"
+	sepBeads := sep + ".beads"
+	// .git holds repo metadata, never config, and on macOS every file under it
+	// costs one kqueue descriptor -- the single biggest watch-set term on a git
+	// checkout. Match the ".git" component only (a repo dir named "foo.git" or a
+	// ".gitignore" file is real content and stays watched).
+	sepGit := sep + ".git"
+	// .claude/worktrees holds agent worktrees, each a FULL checkout of the pack
+	// tree, so recursively watching it multiplies the descriptor cost by the
+	// worktree count. Skip this two-component subtree exactly as pack-hash fix
+	// 269c19cac does -- NOT all of .claude, because .claude/skills is real
+	// watched pack content.
+	sepWorktrees := sep + ".claude" + sep + "worktrees"
 	return clean == ".gc" ||
 		clean == ".beads" ||
+		clean == ".git" ||
+		clean == ".claude"+sep+"worktrees" ||
 		strings.HasSuffix(clean, sepGC) ||
 		strings.HasSuffix(clean, sepBeads) ||
-		strings.Contains(clean, sepGC+string(filepath.Separator)) ||
-		strings.Contains(clean, sepBeads+string(filepath.Separator))
+		strings.HasSuffix(clean, sepGit) ||
+		strings.HasSuffix(clean, sepWorktrees) ||
+		strings.Contains(clean, sepGC+sep) ||
+		strings.Contains(clean, sepBeads+sep) ||
+		strings.Contains(clean, sepGit+sep) ||
+		strings.Contains(clean, sepWorktrees+sep)
 }
 
 // reloadResult holds the result of a config reload attempt.
