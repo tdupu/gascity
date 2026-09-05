@@ -213,7 +213,10 @@
               "ready",
               "storage-recover-stranded",
               "beads-metadata-cas",
-              "order-set-interval"
+              "worktree-cleanup",
+              "worktree-ensure",
+              "worktree-verify",
+              "storage-preflight"
             ]
           },
           "event_id": {
