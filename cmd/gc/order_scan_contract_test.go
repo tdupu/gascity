@@ -51,6 +51,7 @@ func TestOrderScanContractNoCityScanDouble(t *testing.T) {
 exec = "scripts/heartbeat.sh"
 trigger = "cooldown"
 interval = "5m"
+delete_after_close = "1h"
 `)
 
 	cfg := &config.City{
@@ -99,6 +100,7 @@ func TestOrderScanContractRigExclusiveLayerStampsRigField(t *testing.T) {
 exec = "scripts/db-health.sh"
 trigger = "cooldown"
 interval = "10m"
+delete_after_close = "1h"
 `)
 
 	cfg := &config.City{
@@ -136,6 +138,7 @@ func TestOrderScanContractCityAndRigOrdersBothDiscovered(t *testing.T) {
 exec = "scripts/heartbeat.sh"
 trigger = "cooldown"
 interval = "5m"
+delete_after_close = "1h"
 `)
 
 	rigDir := t.TempDir()
@@ -147,6 +150,7 @@ interval = "5m"
 exec = "scripts/db-sweep.sh"
 trigger = "cooldown"
 interval = "10m"
+delete_after_close = "1h"
 `)
 
 	cfg := &config.City{
@@ -551,6 +555,7 @@ func TestOrderScanContractRigScopedOverrideTargetsCorrectOrder(t *testing.T) {
 exec = "scripts/health.sh"
 trigger = "cooldown"
 interval = "5m"
+delete_after_close = "1h"
 `)
 
 	rigDir := t.TempDir()
@@ -562,6 +567,7 @@ interval = "5m"
 exec = "scripts/health.sh"
 trigger = "cooldown"
 interval = "5m"
+delete_after_close = "1h"
 `)
 
 	rigOverrideInterval := "10m"

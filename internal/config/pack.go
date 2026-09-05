@@ -92,6 +92,11 @@ type PackRigDefaults struct {
 // BindingName from imports, resolves paths relative to the pack
 // directory, and appends the agents to the city config.
 //
+// City-level [defaults.rig.imports] entries expand for every rig as a
+// base layer under the rig's own import table: a rig-declared binding
+// of the same name wins wholesale. The merge is composition-only —
+// rig.Imports stays as authored on the returned config.
+//
 // Overrides from the rig are applied to the stamped agents (after all
 // packs for the rig are expanded). All expansion happens before
 // validation — downstream sees a flat City struct.
@@ -118,12 +123,32 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 	for i := range cfg.Rigs {
 		rig := &cfg.Rigs[i]
 		cache := &packLoadCache{results: make(map[string]*packLoadResult)}
+
+		// [defaults.rig.imports] is a city-level base layer under every
+		// rig's own import table: each rig composes every default binding,
+		// and a rig-declared binding of the same name wins wholesale. The
+		// merge is composition-only state — rig.Imports stays as authored
+		// so config rewrites never persist the injected defaults.
+		rigImports := rig.Imports
+		if len(cfg.DefaultRigImports) > 0 {
+			merged := make(map[string]Import, len(cfg.DefaultRigImports)+len(rig.Imports))
+			for name, imp := range cfg.DefaultRigImports {
+				merged[name] = imp
+			}
+			for name, imp := range rig.Imports {
+				merged[name] = imp
+			}
+			rigImports = merged
+		}
+
 		topoRefs := rig.Includes
 		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
 			// When a rig has only a path (no explicit includes/imports), treat
 			// the path directory itself as an implicit include if it contains a
 			// pack.toml. This supports the schema-2 convention where a rig root
-			// can carry a pack.toml with agents/ directories.
+			// can carry a pack.toml with agents/ directories. The check keys on
+			// the authored import table: city-level default imports must not
+			// disable the rig-root convention.
 			if p := strings.TrimSpace(rig.Path); p != "" {
 				packPath := p
 				if !filepath.IsAbs(packPath) {
@@ -133,7 +158,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					topoRefs = []string{packPath}
 				}
 			}
-			if len(topoRefs) == 0 {
+			if len(topoRefs) == 0 && len(rigImports) == 0 {
 				continue
 			}
 		}
@@ -257,16 +282,17 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			}
 		}
 
-		// Process rig-level [imports.X] entries (V2).
-		if len(rig.Imports) > 0 {
-			importNames := make([]string, 0, len(rig.Imports))
-			for name := range rig.Imports {
+		// Process rig-level [imports.X] entries (V2), including the
+		// city-level defaults merged above.
+		if len(rigImports) > 0 {
+			importNames := make([]string, 0, len(rigImports))
+			for name := range rigImports {
 				importNames = append(importNames, name)
 			}
 			sort.Strings(importNames)
 
 			for _, bindingName := range importNames {
-				imp := rig.Imports[bindingName]
+				imp := rigImports[bindingName]
 				if !isOSFileSystem(fs) && builtinpacks.IsSource(imp.Source) {
 					continue
 				}
@@ -835,10 +861,18 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				}
 			}
 
-			allRigAgentsFromCityImports = append(allRigAgentsFromCityImports,
-				expandCityImportedAgentsForRigs(agents, cfg.Rigs, bindingName)...)
-			allRigNamedSessionsFromCityImports = append(allRigNamedSessionsFromCityImports,
-				expandCityImportedNamedSessionsForRigs(namedSessions, cfg.Rigs, bindingName)...)
+			// A binding also present in [defaults.rig.imports] is fanned out to
+			// every rig by the composition-only defaults merge in expandPacks,
+			// which cannot see this authored-table exclusion. Skip the
+			// city-import fan-out for such bindings so the binding composes into
+			// a rig at most once — precedence rig-authored > city defaults >
+			// city-import fan-out (gs-lmf).
+			if _, coveredByDefaults := cfg.DefaultRigImports[bindingName]; !coveredByDefaults {
+				allRigAgentsFromCityImports = append(allRigAgentsFromCityImports,
+					expandCityImportedAgentsForRigs(agents, cfg.Rigs, bindingName)...)
+				allRigNamedSessionsFromCityImports = append(allRigNamedSessionsFromCityImports,
+					expandCityImportedNamedSessionsForRigs(namedSessions, cfg.Rigs, bindingName)...)
+			}
 
 			allRequires = append(allRequires, reqs...)
 			allGlobals = append(allGlobals, globals...)
@@ -2893,12 +2927,17 @@ func PackContentHash(fs fsys.FS, topoDir string) string {
 // connection churn was eliminated (gastownhall/gascity#1978 follow-up).
 //
 // The cache keys the content hash by absolute pack dir plus a cheap stat
-// fingerprint (per-file size+mtime, no content reads). An unchanged tree is
-// content-hashed once and reused — both for repeats within a single tick and
-// across ticks. Invalidation follows standard build-cache semantics: any file
-// add/remove, size change, or mtime bump (every normal edit and git checkout)
-// changes the fingerprint and forces a re-hash. The only blind spot is an edit
-// that preserves both size and mtime, which pack tooling does not do.
+// fingerprint (per-file size+mtime+ctime, no content reads). An unchanged
+// tree is content-hashed once and reused — both for repeats within a single
+// tick and across ticks. Invalidation follows standard build-cache semantics:
+// any file add/remove, size change, or mtime bump (every normal edit and git
+// checkout) changes the fingerprint and forces a re-hash. ctime guards the one
+// gap size+mtime leaves open: mtime-preserving deploy tooling (cp -p,
+// rsync --checksum --times) can edit content while leaving size and mtime
+// unchanged, but no standard syscall lets userspace roll ctime back, so it
+// still moves. The residual blind spot is narrower, not gone: a false cache
+// hit now requires size, mtime, AND ctime to all collide simultaneously
+// (e.g. two edits landing in the same coarse filesystem timestamp granule).
 var packContentHashCache sync.Map // absDir(string) -> packContentHashEntry
 
 type packContentHashEntry struct {
@@ -2944,6 +2983,9 @@ func packContentHashRecursive(fs fsys.FS, topoDir string, useCache bool) string 
 		fmt.Fprintf(fp, "%s\x00", relPath) //nolint:errcheck // hash.Write never errors
 		if info, statErr := fs.Stat(filepath.Join(topoDir, relPath)); statErr == nil {
 			fmt.Fprintf(fp, "%d\x00%d\x00", info.Size(), info.ModTime().UnixNano()) //nolint:errcheck
+			if ctime, ok := statCtimeNanos(info); ok {
+				fmt.Fprintf(fp, "%d\x00", ctime) //nolint:errcheck // hash.Write never errors
+			}
 		}
 	}
 	fpSum := fp.Sum64()
@@ -3016,8 +3058,29 @@ func isIgnoredPackRuntimePath(path string) bool {
 	// monorepo roots, opening tens of thousands of files into the
 	// supervisor every dirty reload (gastownhall/gascity#2954). Matches
 	// the existing __pycache__ precedent for Python ecosystems.
-	for _, part := range parts {
-		if part == "__pycache__" || part == "node_modules" {
+	//
+	// Agent worktrees are skipped for the same reason: every entry under
+	// .claude/worktrees is a FULL CHECKOUT of the pack tree, so a repo with
+	// N agent worktrees multiplies the walk by N+1 while hashing content
+	// that cannot affect the running city. Measured on one deployment:
+	// 6,424 files hashed dropping to 871 once worktrees were excluded --
+	// 86% of every walk, 88MB down to about 1MB. There the startup walk
+	// grew past the bead-store init deadline, so the city did not merely
+	// start slowly, it could not start at all and retried the identical
+	// doomed walk indefinitely.
+	//
+	// Scoped deliberately to .claude/worktrees rather than all of .claude:
+	// .claude/skills is real pack content in some checkout layouts (one
+	// canonical mathcity checkout carries 114 skills there). Skipping the
+	// whole directory would drop those from the hash SILENTLY -- edit a
+	// skill, the hash would not change, the pack would not read as dirty,
+	// and agents would keep loading the stale skill with nothing reporting
+	// an error. The few bytes saved are not worth that failure mode.
+	for i, part := range parts {
+		if part == "__pycache__" || part == "node_modules" || part == ".pytest_cache" {
+			return true
+		}
+		if part == ".claude" && i+1 < len(parts) && parts[i+1] == "worktrees" {
 			return true
 		}
 	}

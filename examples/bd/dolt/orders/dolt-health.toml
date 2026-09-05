@@ -2,4 +2,6 @@
 description = "Check dolt server health without restarting it"
 trigger = "cooldown"
 interval = "30s"
+# Sub-15m cooldown orders must declare tracking-bead retention (gs-a4j).
+delete_after_close = "24h"
 exec = "gc dolt health --json | gc dolt health-check"

@@ -364,28 +364,28 @@ func TestResolveAgentIdentityRejectsCanonicalSingletonPoolSuffix(t *testing.T) {
 	}
 }
 
-// TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance is a
-// regression for #4843: a binding-qualified, city-scoped pool instance like
-// "testpack.worker-1" must resolve to its "testpack.worker" pool. The
-// CLI-local resolveAgentIdentity gated its Step 2b pool-instance check on
-// strings.Contains(input, "/"), so the dot-qualified form was never routed
-// to resolvePoolInstance — even though the shared resolver helper
+// TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance is a regression
+// for gt-gf0tk / #4843: a binding-qualified, city-scoped pool instance like
+// "mathcity.brief-operator-1" must resolve to its "mathcity.brief-operator"
+// pool. The CLI-local resolveAgentIdentity gated its Step 2b pool-instance
+// check on strings.Contains(input, "/"), so the dot-qualified form was never
+// routed to resolvePoolInstance — even though the shared resolver helper
 // (internal/agentutil/resolve.go) already handles it via ContainsAny(input, "/.").
 func TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", BindingName: "testpack", Dir: "", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+			{Name: "brief-operator", BindingName: "mathcity", Dir: "", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(12)},
 		},
 	}
-	a, ok := resolveAgentIdentity(cfg, "testpack.worker-1", "")
+	a, ok := resolveAgentIdentity(cfg, "mathcity.brief-operator-1", "")
 	if !ok {
-		t.Fatalf("resolveAgentIdentity(testpack.worker-1) = (_, false), want the worker pool instance")
+		t.Fatalf("resolveAgentIdentity(mathcity.brief-operator-1) = (_, false), want the brief-operator pool instance")
 	}
-	if a.Name != "worker-1" {
-		t.Fatalf("resolveAgentIdentity(testpack.worker-1) resolved Name = %q, want %q", a.Name, "worker-1")
+	if a.Name != "brief-operator-1" {
+		t.Fatalf("resolveAgentIdentity(mathcity.brief-operator-1) resolved Name = %q, want %q", a.Name, "brief-operator-1")
 	}
-	if _, ok := resolveAgentIdentity(cfg, "testpack.worker-3", ""); ok {
-		t.Fatal("resolveAgentIdentity(testpack.worker-3) = true, want false: exceeds max_active_sessions=2")
+	if _, ok := resolveAgentIdentity(cfg, "mathcity.brief-operator-13", ""); ok {
+		t.Fatal("resolveAgentIdentity(mathcity.brief-operator-13) = true, want false: exceeds max_active_sessions=12")
 	}
 }
 

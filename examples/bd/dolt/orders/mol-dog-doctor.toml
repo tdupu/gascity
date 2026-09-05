@@ -6,3 +6,5 @@ description = "Probe Dolt server health and report status"
 exec = "$PACK_DIR/assets/scripts/mol-dog-doctor.sh"
 trigger = "cooldown"
 interval = "5m"
+# Sub-15m cooldown orders must declare tracking-bead retention (gs-a4j).
+delete_after_close = "48h"

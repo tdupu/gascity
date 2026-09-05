@@ -70,6 +70,7 @@ func TestIsReadyExcludedType(t *testing.T) {
 		{"agent", true},
 		{"role", true},
 		{"rig", true},
+		{"startup-health-episode", true}, // bookkeeping record; never actionable Ready work (ga-o04bfr.1.1)
 		{"task", false},
 		{"wisp", false},
 		{"", false},
@@ -144,6 +145,40 @@ func TestIsReadyCandidate(t *testing.T) {
 				t.Fatalf("IsReadyCandidate(%+v) = %v, want %v", tt.bead, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBeadUnmarshalCoercesNonStringMetadata(t *testing.T) {
+	var b Bead
+	input := []byte(`{
+		"id": "he-example",
+		"title": "typed metadata",
+		"status": "open",
+		"issue_type": "task",
+		"metadata": {
+			"gc.routed_to": "hecke/gastown.polecat",
+			"auto_claim": false,
+			"unlock_count": 10,
+			"gates": ["he-jwmy", "he-cnat"],
+			"none": null
+		}
+	}`)
+
+	if err := json.Unmarshal(input, &b); err != nil {
+		t.Fatalf("Unmarshal(Bead) failed: %v", err)
+	}
+
+	want := map[string]string{
+		"gc.routed_to": "hecke/gastown.polecat",
+		"auto_claim":   "false",
+		"unlock_count": "10",
+		"gates":        `["he-jwmy", "he-cnat"]`,
+		"none":         "",
+	}
+	for key, wantValue := range want {
+		if got := b.Metadata[key]; got != wantValue {
+			t.Fatalf("metadata[%q] = %q, want %q", key, got, wantValue)
+		}
 	}
 }
 

@@ -17,9 +17,11 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
@@ -42,7 +44,7 @@ tick and dispatches work when a trigger opens.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history, sweep-tracking, sweep-nudge-mail)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc order: missing subcommand (list, show, run, check, history, sweep-tracking, sweep-nudge-mail, set-interval)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc order: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -57,6 +59,7 @@ tick and dispatches work when a trigger opens.`,
 		newOrderHistoryCmd(stdout, stderr),
 		newOrderSweepTrackingCmd(stdout, stderr),
 		newOrderSweepNudgeMailCmd(stdout, stderr),
+		newOrderSetIntervalCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -370,7 +373,7 @@ func loadAllOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.Ci
 // loadAllOrders scans all configured orders and applies configured overrides.
 // Callers that execute or list active work should use loadActiveOrders instead.
 func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(stderr, cmdName))
+	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(cfg, stderr, cmdName))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
@@ -389,10 +392,10 @@ func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer
 // scanAllOrders returns the shared post-override discovery view used by command
 // tests and compatibility call sites.
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
-	return orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(stderr, cmdName))
+	return orderdiscovery.ScanAll(cityPath, cfg, orderScanOptions(cfg, stderr, cmdName))
 }
 
-func orderScanOptions(stderr io.Writer, cmdName string) orderdiscovery.ScanOptions {
+func orderScanOptions(cfg *config.City, stderr io.Writer, cmdName string) orderdiscovery.ScanOptions {
 	return orderdiscovery.ScanOptions{
 		OnRigScanError: func(rigName string, err error) error {
 			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
@@ -402,7 +405,7 @@ func orderScanOptions(stderr io.Writer, cmdName string) orderdiscovery.ScanOptio
 			fmt.Fprintf(stderr, "%s: order %s: %v\n", cmdName, orderName, err) //nolint:errcheck // best-effort stderr
 			return nil
 		},
-		ValidateOrder: validateOrderExecEnvOverrides,
+		ValidateOrder: orderValidators(cfg),
 	}
 }
 
@@ -808,12 +811,17 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// GraphApplyStore and silently fall back to sequential creation. store stays
 	// the typed wrapper for the order-tracking bead operations below.
 	genericStore := store.Store
-	recipe, err := prepareOrderWispRecipe(context.Background(), genericStore, a, searchPaths, vars)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(context.Background(), genericStore, a, searchPaths, vars)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
+	// Validate against the resolved invocation vars (declared defaults
+	// applied), not the caller's raw --var map. Passing an empty Options here
+	// drops them, and ValidateRecipeRuntimeVars reads opts.Vars — so every
+	// `required = true` var reports as missing however many --var flags were given,
+	// making any formula with a required var unfireable as an order.
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: effectiveVars}); err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -853,7 +861,14 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		return 1
 	}
 
-	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{})
+	// Thread the same resolved invocation vars used for validation above into
+	// instantiation. An empty Options here falls back to formula defaults
+	// only, so every {{var}} referencing a caller-supplied value renders
+	// empty (or its default) on the created bead text instead of the
+	// caller's value (#4668).
+	stampOrderWispRuntimeVars(recipe, effectiveVars)
+
+	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1170,6 +1185,38 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 	return doOrderCheckWithStoresResolverScopedJSON(cityPath, cfg, aa, now, ep, resolveStores, false, stdout, stderr)
 }
 
+// orderCheckFiredEventTailLimit bounds the newest-first order.fired read
+// below, and mirrors internal/doctor's orderFiringEventTailLimit in both the
+// value and the reason it is safe: the lastRunFn built below already falls
+// through to the authoritative order-run history (baseLastRunFn) whenever the
+// tail does not carry a fresh-enough fired event for an order, so bounding
+// this read can only cost the cooldown fast path, never manufacture a false
+// "never fired" the way an unguarded Limit would.
+//
+// The safety of that fall-through rests on the shape of the shortcut, not
+// on any timestamp ordering between the event and the order-run history:
+// the fired event is consulted only to return "not due" early, so losing it
+// can only move an order toward due, never away from it. The bound can
+// therefore advance a firing but cannot suppress one, which is the property
+// a scheduler needs. (Do not restate this as a claim that the bead is the
+// older record. orders.LastRunAcross takes the newest order-run evidence,
+// which a wisp root labeled after the event, or a later manual gc order run,
+// can push past the event's own timestamp.)
+//
+// One behavior does change, and it is inherent to bounding rather than
+// incidental. When the shortcut fired, baseLastRunFn was never called, so a
+// failing LastRun read on that order's store stayed masked. An order whose
+// event has been evicted now reaches that read, and lastRunErr aborts the
+// whole check. No bounded read can recover the evicted event, so this is the
+// cost of not walking the archives: a store failure that used to be hidden
+// behind a cached event is now reported.
+//
+// The tail read walks the active event log backward and stops at this many
+// matches; it never opens the gzipped archives, which is where the unbounded
+// List spent its time. A log holding fewer than this many order.fired events
+// is still walked to its start.
+const orderCheckFiredEventTailLimit = 2000
+
 func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
 		if jsonOutput {
@@ -1191,7 +1238,12 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 
 	var firedEvents []events.Event
 	if ep != nil {
-		firedEvents, _ = ep.List(events.Filter{Type: events.OrderFired})
+		filter := events.Filter{Type: events.OrderFired}
+		if tp, ok := ep.(events.TailProvider); ok {
+			firedEvents, _ = tp.ListTail(filter, orderCheckFiredEventTailLimit)
+		} else {
+			firedEvents, _ = ep.List(filter)
+		}
 	}
 	latestFired := make(map[string]time.Time)
 	for _, event := range firedEvents {
@@ -1208,7 +1260,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
 		}
 		for _, a := range aa {
-			if err := validateOrderCheckPreflight(a); err != nil {
+			if err := validateOrderCheckPreflight(a, cfg); err != nil {
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -1287,7 +1339,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 	}
 	anyDue := false
 	for _, a := range aa {
-		if err := validateOrderCheckPreflight(a); err != nil {
+		if err := validateOrderCheckPreflight(a, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -1358,8 +1410,8 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 	return 1
 }
 
-func validateOrderCheckPreflight(a orders.Order) error {
-	return validateOrderExecEnvOverrides(a)
+func validateOrderCheckPreflight(a orders.Order, cfg *config.City) error {
+	return orderValidators(cfg)(a)
 }
 
 // --- gc order history ---
@@ -2155,5 +2207,62 @@ func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, n
 	}
 	fmt.Fprintf(stdout, "nudge-mail-sweep: closed %d nudge bead(s), %d mail bead(s)  %s\n", //nolint:errcheck // best-effort stdout
 		result.NudgeClosed, result.MailClosed, budgetLine)
+	return 0
+}
+
+// --- gc order set-interval ---
+
+func newOrderSetIntervalCmd(stdout, stderr io.Writer) *cobra.Command {
+	var rig string
+	cmd := &cobra.Command{
+		Use:   "set-interval <name> <duration>",
+		Short: "Set the cooldown interval for an order override in city.toml",
+		Long: `Set the [[orders.overrides]] interval field for a named order in city.toml.
+
+Creates or updates an override entry for the named order with the given
+Go duration string as the interval (e.g. 30m, 2h, 24h). This provides a
+policy-compliant alternative to hand-editing city.toml (POLICY.md P1.2).
+
+Use --rig to scope the override to a specific rig's order.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if cmdOrderSetInterval(args[0], args[1], rig, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+		ValidArgsFunction: completeOrderNames,
+	}
+	cmd.Flags().StringVar(&rig, "rig", "", "rig name to scope the override")
+	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
+	return cmd
+}
+
+// cmdOrderSetInterval writes an [[orders.overrides]] interval entry into city.toml.
+func cmdOrderSetInterval(name, interval, rig string, stdout, stderr io.Writer) int {
+	if _, err := time.ParseDuration(interval); err != nil {
+		fmt.Fprintf(stderr, "gc order set-interval: invalid duration %q: %v\n", interval, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order set-interval: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	editor := configedit.NewEditor(fsys.OSFS{}, tomlPath)
+	if err := editor.MergeOrderOverride(config.OrderOverride{
+		Name:     name,
+		Rig:      rig,
+		Interval: &interval,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc order set-interval: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if rig != "" {
+		fmt.Fprintf(stdout, "Order %q (rig %q) interval set to %s\n", name, rig, interval) //nolint:errcheck // best-effort stdout
+	} else {
+		fmt.Fprintf(stdout, "Order %q interval set to %s\n", name, interval) //nolint:errcheck // best-effort stdout
+	}
 	return 0
 }

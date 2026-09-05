@@ -366,6 +366,7 @@ schema = 2
 description = "Poll watcher state"
 trigger = "cooldown"
 interval = "5m"
+delete_after_close = "1h"
 exec = "$PACK_DIR/scripts/poll.sh"
 `)
 

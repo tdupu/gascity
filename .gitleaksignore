@@ -1,0 +1,39 @@
+
+# Upstream (gastownhall) test-fixture UUIDs mis-flagged as generic-api-key by
+# the fork pre-push hook scanning the full merge range. Confirmed false positives
+# (sessionKey/decoyKey/attemptToken UUIDs + RFC example UUIDs), already public
+# upstream, none in local commits. Added 2026-07-21 during origin merge (ea25d87).
+5edb0ff205563e10ab92c4edf0368e96c61d8103:examples/bd/dolt/health_test.go:generic-api-key:1165
+a53443ffb65ea333fe9e1bef850d8d98a8e36aaa:cmd/gc/usage_compute_test.go:generic-api-key:339
+a53443ffb65ea333fe9e1bef850d8d98a8e36aaa:cmd/gc/usage_compute_test.go:generic-api-key:456
+a53443ffb65ea333fe9e1bef850d8d98a8e36aaa:internal/worker/invocation_telemetry_usagefact_test.go:generic-api-key:471
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/api/handler_sessions_test.go:generic-api-key:1010
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/api/handler_sessions_test.go:generic-api-key:1011
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/session/transcript_lookup_test.go:generic-api-key:128
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/session/transcript_lookup_test.go:generic-api-key:148
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/session/transcript_lookup_test.go:generic-api-key:75
+aa0c20af554ae75cd6a53cce5434f201e2e39c9f:internal/session/transcript_lookup_test.go:generic-api-key:76
+bdd910642465261558addc963fd827e3d1ad1eff:engdocs/plans/reconciler-redesign/IMPLEMENTATION_PLAN.md:generic-api-key:932
+c8fcd83f0e2e74fe0655dd9fcabc2f45b7dc83a1:cmd/gc/productmetrics_private_process_test.go:generic-api-key:173
+c8fcd83f0e2e74fe0655dd9fcabc2f45b7dc83a1:cmd/gc/productmetrics_private_process_test.go:generic-api-key:95
+
+# Upstream (gastownhall) false positives re-surfaced under new commit SHAs by the
+# 2026-08-03 origin sync merge (37e1aba2). Verified benign: 6 are RFC-example /
+# UUIDv7 test-fixture UUIDs in _test.go files (same class as the 2026-07-21 batch);
+# 1 is productmetrics/pause.go's compiled ed25519 PUBLIC key (its private seed lives
+# in OpenBao, per the source comment — public keys belong in source). None are real
+# secrets; none are local-authored.
+bbdc2561f3eb5aec7d4a45239c7ad9010216abb7:internal/api/handler_usage_test.go:generic-api-key:84
+3928f31ed8cb7b4321560f297ce46d490a602ffb:internal/productmetrics/pause.go:generic-api-key:34
+ce30237e8a4ed2249f1b1a38663f542a249aa210:cmd/gc/productmetrics_private_process_testhook_test.go:generic-api-key:86
+ce30237e8a4ed2249f1b1a38663f542a249aa210:cmd/gc/productmetrics_private_process_testhook_test.go:generic-api-key:164
+f8b51359ba093cfe5b9b90697b2f25a94b90fb0d:cmd/gc/usage_compute_test.go:generic-api-key:339
+f8b51359ba093cfe5b9b90697b2f25a94b90fb0d:cmd/gc/usage_compute_test.go:generic-api-key:456
+f8b51359ba093cfe5b9b90697b2f25a94b90fb0d:internal/worker/invocation_telemetry_usagefact_test.go:generic-api-key:471
+
+# 2026-08-15 upstream (gastownhall) test-fixture false positives surfaced by the
+# 236-commit reconcile merge: a placeholder generic token and a session-key test
+# UUID, both in upstream *_test.go, already public, none in local commits.
+# (secret strings intentionally not quoted here — that would re-trip the scanner.)
+3daba00277e51bbf1de230c11cd966e33e6e3d39:internal/storebinding/provider_endpoint_test.go:generic-api-key:84
+ad4d0ab4a9e14f57faed3eaa20a658ef743e1c09:cmd/gc/usage_compute_test.go:generic-api-key:306

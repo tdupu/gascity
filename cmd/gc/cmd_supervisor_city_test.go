@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1837,7 +1838,7 @@ func TestReconcileCitiesUnregisterEventUsesManagedCityName(t *testing.T) {
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	recorded := supRec.Events
 	if len(recorded) != 1 {
@@ -1918,7 +1919,7 @@ func TestReconcileCitiesEmitsCityCreateFailureForPendingConfigLoadError(t *testi
 	}
 
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	recorded := supRec.Events
 	if len(recorded) != 1 {
@@ -1973,7 +1974,7 @@ func TestReconcileCitiesUnregisterSkipsRequestResultWithoutPendingRequestID(t *t
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	if len(supRec.Events) != 0 {
 		t.Fatalf("recorded %d supervisor events without pending request_id, want 0: %#v", len(supRec.Events), supRec.Events)
@@ -2227,7 +2228,7 @@ func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
 	})
 	var stdout, stderr bytes.Buffer
 
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	ops := readOpLog(t, logFile)
 	assertSingleStopWithBenignNoise(t, ops)
@@ -2270,7 +2271,7 @@ shutdown_timeout = "100ms"
 
 	cr := newCityRegistry()
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	sockPath := filepath.Join(canonicalTestPath(cityPath), ".gc", "controller.sock")
 	if _, err := os.Stat(sockPath); err != nil {
@@ -2487,7 +2488,7 @@ func TestReconcileCitiesSkipsCityAlreadyInitializing(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	registry.ReadCallback(func(
 		_ map[string]*managedCity,
@@ -2518,7 +2519,7 @@ func TestReconcileCitiesAutoUnregistersAbsentDirectory(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	for i := 0; i < staleCityDirAbsentThreshold; i++ {
-		reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+		reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 	}
 
 	entries, err := reg.List()
@@ -2549,7 +2550,7 @@ func TestReconcileCitiesDoesNotUnregisterBeforeThreshold(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	for i := 0; i < staleCityDirAbsentThreshold-1; i++ {
-		reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+		reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 	}
 
 	entries, err := reg.List()
@@ -2581,13 +2582,13 @@ func TestReconcileCitiesResetsAbsentCounterWhenDirectoryReappears(t *testing.T) 
 	var stdout, stderr bytes.Buffer
 
 	for i := 0; i < staleCityDirAbsentThreshold-1; i++ {
-		reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+		reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 	}
 
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	reconcileCities(reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, registry, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	var dirAbsent int
 	registry.ReadCallback(func(
@@ -2862,6 +2863,33 @@ func TestStartupSessionComputationsDoNotQueryBeadStore(t *testing.T) {
 
 	if ops := readOpLog(t, logFile); len(ops) != 0 {
 		t.Fatalf("startup session computations should not touch bead store, got ops %v", ops)
+	}
+}
+
+func TestStartupPoolDeathHandlerEnvUsesLoadedConfig(t *testing.T) {
+	cityPath, _, cfg := newControllerProbeFixture(t)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace\n"), 0o600); err != nil {
+		t.Fatalf("write invalid city.toml: %v", err)
+	}
+
+	cfg.Workspace.Name = "my-city"
+	cfg.Agents[0] = config.Agent{
+		Name:              "worker",
+		Dir:               "demo",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(2),
+		OnDeath:           "echo death",
+	}
+
+	var stderr bytes.Buffer
+	handlers := computePoolDeathHandlers(cfg, "my-city", cityPath, runtime.NewFake(), &stderr)
+	if len(handlers) != 2 {
+		t.Fatalf("computePoolDeathHandlers() returned %d handlers, want 2; stderr=%q", len(handlers), stderr.String())
+	}
+	for sessionName, info := range handlers {
+		if got := info.Env["GC_RIG"]; got != "demo" {
+			t.Fatalf("%s GC_RIG = %q, want demo", sessionName, got)
+		}
 	}
 }
 

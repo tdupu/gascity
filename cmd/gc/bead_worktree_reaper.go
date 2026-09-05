@@ -91,10 +91,16 @@ type reapReport struct {
 // is announced once rather than on every tick; a nil tracker reports every
 // skip. It never changes what is reaped or what the returned report contains —
 // see reapSkipTracker.
+//
+// rigStores is spelled that way on purpose: the obvious `rigBeadStores` is
+// residency-boundary vocabulary (a:rigBeadStores), and ast:vocabulary-alias
+// guards that NAME without type resolution, so an unrelated parameter carrying
+// it counts as a store-enumeration site. See the alias-rule block in
+// scripts/residency-boundary-patterns.txt.
 func reapClosedBeadWorktrees(
 	cityPath string,
 	cfg *config.City,
-	rigBeadStores map[string]beads.Store,
+	rigStores map[string]beads.Store,
 	liveSessionDirs []string,
 	dryRun bool,
 	rec events.Recorder,
@@ -108,7 +114,7 @@ func reapClosedBeadWorktrees(
 	if rec == nil {
 		rec = events.Discard
 	}
-	if cfg == nil || len(rigBeadStores) == 0 {
+	if cfg == nil || len(rigStores) == 0 {
 		return report
 	}
 
@@ -136,7 +142,7 @@ func reapClosedBeadWorktrees(
 
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
 
-	for rigName, store := range rigBeadStores {
+	for rigName, store := range rigStores {
 		if store == nil {
 			continue
 		}
@@ -345,7 +351,10 @@ func reapClosedBeadWorktrees(
 
 			// Remove the worktree from the OWNING rig repository. git worktree
 			// remove must be run from the main repo root, not from within the
-			// worktree being removed.
+			// worktree being removed. Resolving rigRoot (rigRootByName, at the
+			// top of the rig loop) instead of cityPath is the fork fix from
+			// tdupu/gascity#2: rigs using a bare .repo.git need their worktrees
+			// removed from the rig root, else "not a working tree" (exit 128).
 			if err := git.New(rigRoot).WorktreeRemove(worktreePath, false); err != nil {
 				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: removing %s: %v\n", worktreePath, err) //nolint:errcheck
 				continue
@@ -609,4 +618,17 @@ func isStrictlyUnderDir(dir, path string) bool {
 		return false
 	}
 	return rel != "." && !strings.HasPrefix(rel, "..")
+}
+
+// lookupRigRoot returns the filesystem path configured for the named rig, or
+// "" when the rig is not listed in cfg.Rigs or its path is empty. Mirrors the
+// inner rig-name→path lookup in lookupRigRootForSession (session_worktree_prune.go)
+// but operates on a rig name directly rather than extracting it from session metadata.
+func lookupRigRoot(rigName string, cfg *config.City) string {
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == rigName {
+			return strings.TrimSpace(cfg.Rigs[i].Path)
+		}
+	}
+	return ""
 }

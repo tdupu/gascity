@@ -10,6 +10,18 @@ import (
 	"time"
 )
 
+// trueExecutable resolves the no-op `true` binary from PATH. Its location is
+// platform-dependent (/bin/true on Linux, /usr/bin/true on macOS), so tests
+// must not hardcode it.
+func trueExecutable(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("true")
+	if err != nil {
+		t.Skipf("no `true` executable in PATH: %v", err)
+	}
+	return path
+}
+
 // trackingReader counts how many bytes were read from the wrapped reader, so a
 // test can assert gc hook run fully consumed the provider's hook stdin.
 type trackingReader struct {
@@ -33,12 +45,13 @@ func (t *trackingReader) Read(p []byte) (int, error) {
 //
 // gc hook run must fully consume its stdin so the provider's write always
 // completes, regardless of whether the wrapped command reads it. The wrapped
-// executable here is "true" (resolved via LookPath — its absolute path
+// executable here is `true` (resolved via LookPath — its absolute path
 // differs by platform, e.g. /usr/bin/true on macOS vs /bin/true on Linux),
 // which exits 0 without reading stdin.
 func TestHookRunConsumesStdinWhenWrappedCommandIgnoresIt(t *testing.T) {
 	orig := hookRunExecutable
-	hookRunExecutable = func() (string, error) { return exec.LookPath("true") }
+	truePath := trueExecutable(t)
+	hookRunExecutable = func() (string, error) { return truePath, nil }
 	t.Cleanup(func() { hookRunExecutable = orig })
 
 	payload := strings.Repeat("x", 8192)
@@ -88,7 +101,8 @@ func (b *blockingReader) Read(p []byte) (int, error) {
 // configured timeout instead of wedging before it spawns the child.
 func TestHookRunReturnsWithinTimeoutWhenStdinNeverEOFs(t *testing.T) {
 	orig := hookRunExecutable
-	hookRunExecutable = func() (string, error) { return exec.LookPath("true") }
+	truePath := trueExecutable(t)
+	hookRunExecutable = func() (string, error) { return truePath, nil }
 	t.Cleanup(func() { hookRunExecutable = orig })
 
 	release := make(chan struct{})
@@ -132,7 +146,7 @@ func TestHookRunReturnsWithinTimeoutWhenStdinNeverEOFs(t *testing.T) {
 // A PTY master from /dev/ptmx is the terminal proxy: it is a char-device
 // *os.File whose Read blocks forever with no EOF while no slave writes to it,
 // which is exactly the shape of os.Stdin on a real terminal. The wrapped
-// executable is "true" (resolved via LookPath), which exits 0 without
+// executable is `true` (resolved via LookPath), which exits 0 without
 // reading stdin.
 func TestHookRunSkipsStdinDrainForTerminal(t *testing.T) {
 	tty, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
@@ -148,7 +162,8 @@ func TestHookRunSkipsStdinDrainForTerminal(t *testing.T) {
 	}
 
 	orig := hookRunExecutable
-	hookRunExecutable = func() (string, error) { return exec.LookPath("true") }
+	truePath := trueExecutable(t)
+	hookRunExecutable = func() (string, error) { return truePath, nil }
 	t.Cleanup(func() { hookRunExecutable = orig })
 
 	var stdout, stderr bytes.Buffer

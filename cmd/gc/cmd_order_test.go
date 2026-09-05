@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -692,6 +693,39 @@ func TestOrderCheckWithStoresResolverRejectsReservedOrderEnvKey(t *testing.T) {
 	}
 }
 
+// TestOrderCheckRejectsHighFrequencyCooldownWithoutRetentionPolicy verifies
+// that gc order check returns exit 1 and an actionable stderr diagnostic when
+// a cooldown order fires faster than 15m but has no explicit delete_after_close
+// retention policy at the order or city level.
+func TestOrderCheckRejectsHighFrequencyCooldownWithoutRetentionPolicy(t *testing.T) {
+	aa := []orders.Order{
+		{
+			Name:     "fast-sweep",
+			Trigger:  "cooldown",
+			Interval: "5m",
+			Formula:  "mol-sweep",
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(
+		t.TempDir(),
+		&config.City{}, // no city-level delete_after_close override
+		aa,
+		time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC),
+		nil,
+		func(orders.Order) ([]beads.OrdersStore, error) { return nil, nil },
+		&stdout,
+		&stderr,
+	)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 1; stdout: %s; stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "delete_after_close") {
+		t.Fatalf("stderr = %q, want delete_after_close retention diagnostic", got)
+	}
+}
+
 func TestOrderCheckNoneDue(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "deploy", Trigger: "manual", Formula: "mol-deploy"},
@@ -790,6 +824,123 @@ func TestOrderCheckWithLastRun(t *testing.T) {
 	}
 	if !strings.Contains(out, "cooldown") {
 		t.Errorf("stdout missing 'cooldown':\n%s", out)
+	}
+}
+
+// countingTailEventProvider wraps events.Fake and records whether List
+// (unbounded) or ListTail (bounded) was invoked, so tests can assert the
+// order-check read path stays bounded.
+type countingTailEventProvider struct {
+	*events.Fake
+	listCalls int
+	tailCalls int
+	tailLimit int
+}
+
+func (p *countingTailEventProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.listCalls++
+	return p.Fake.List(filter)
+}
+
+func (p *countingTailEventProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	p.tailCalls++
+	p.tailLimit = limit
+	return p.Fake.ListTail(filter, limit)
+}
+
+// TestOrderCheckWithStoresResolverUsesBoundedEventTail confirms that gc order
+// check reads order.fired events through the bounded ListTail path (not the
+// unbounded, full-archive-walking List) and that an order whose fired event
+// falls outside the tail window still resolves correctly, because lastRunFn
+// falls through to the authoritative order-run history in that case.
+func TestOrderCheckWithStoresResolverUsesBoundedEventTail(t *testing.T) {
+	fake := events.NewFake()
+	// "digest" fires once, then more unrelated order.fired events than the
+	// tail limit push it out of the newest-first window. The bounded read
+	// therefore cannot see it, so the not-due answer asserted below can only
+	// come from the authoritative order-run fallback.
+	fake.Record(events.Event{Type: events.OrderFired, Subject: "digest"})
+	for i := 0; i < orderCheckFiredEventTailLimit+10; i++ {
+		fake.Record(events.Event{Type: events.OrderFired, Subject: "noise"})
+	}
+	ep := &countingTailEventProvider{Fake: fake}
+
+	cityStore := beads.NewMemStore()
+	now := time.Now().Add(time.Second)
+	if _, err := cityStore.Create(beads.Bead{
+		Title:  "recent digest run",
+		Labels: []string{"order-run:digest"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:     "digest",
+		Trigger:  "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: cityStore}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolver(aa, now, ep, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolver = %d, want 1 (cooldown active via order-run fallback); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "cooldown: ") {
+		t.Fatalf("stdout missing not-due cooldown row:\n%s", stdout.String())
+	}
+	if ep.listCalls != 0 {
+		t.Errorf("List called %d times, want 0 (order check must use the bounded ListTail path)", ep.listCalls)
+	}
+	if ep.tailCalls == 0 {
+		t.Errorf("ListTail was never called")
+	}
+	if ep.tailLimit != orderCheckFiredEventTailLimit {
+		t.Errorf("ListTail limit = %d, want %d (a non-positive limit would read unbounded)", ep.tailLimit, orderCheckFiredEventTailLimit)
+	}
+}
+
+// TestOrderCheckWithStoresResolverNeverFiredIsDue completes the never/recent/old
+// regression matrix for the bounded event-tail read: an order with no
+// order.fired event anywhere in the tail and no order-run history at all is
+// the "never fired" case, and must still resolve to due — the bounded read
+// must not turn "the tail happens to be empty" into a false negative.
+func TestOrderCheckWithStoresResolverNeverFiredIsDue(t *testing.T) {
+	fake := events.NewFake()
+	// Noise for unrelated orders only; "digest" never fires.
+	fake.Record(events.Event{Type: events.OrderFired, Subject: "noise"})
+	ep := &countingTailEventProvider{Fake: fake}
+
+	aa := []orders.Order{{
+		Name:     "digest",
+		Trigger:  "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: beads.NewMemStore()}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	now := time.Now()
+	code := doOrderCheckWithStoresResolver(aa, now, ep, resolver, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderCheckWithStoresResolver = %d, want 0 (never fired, due); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "never run") {
+		t.Fatalf("stdout missing never-run due row:\n%s", stdout.String())
+	}
+	if ep.listCalls != 0 {
+		t.Errorf("List called %d times, want 0 (order check must use the bounded ListTail path)", ep.listCalls)
+	}
+	if ep.tailCalls == 0 {
+		t.Errorf("ListTail was never called")
+	}
+	if ep.tailLimit != orderCheckFiredEventTailLimit {
+		t.Errorf("ListTail limit = %d, want %d (a non-positive limit would read unbounded)", ep.tailLimit, orderCheckFiredEventTailLimit)
 	}
 }
 
@@ -2371,6 +2522,119 @@ title = "Do work"
 	}
 	if !foundControl {
 		t.Fatal("missing workflow-finalize control step")
+	}
+}
+
+// TestOrderRunGraphWorkflowPersistsRuntimeVars is the store-level regression
+// test for the graph.v2 stamping gap found on #4668: a caller var passed to a
+// graph.v2 order must be recoverable from the persisted root bead's
+// gc.graphv2_vars.v1 metadata (the key internal/dispatch/drain.go reads on
+// later fan-out), not just present on the in-memory recipe before
+// materialization.
+func TestOrderRunGraphWorkflowPersistsRuntimeVars(t *testing.T) {
+	cityDir := t.TempDir()
+	formulaDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cityToml := `[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "fixture"
+path = "fixture"
+
+[[agent]]
+name = "quinn"
+dir = "fixture"
+min_active_sessions = 0
+max_active_sessions = 2
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+[[agent]]
+name = "control-dispatcher"
+dir = "fixture"
+max_active_sessions = 1
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	graphFormula := `
+formula = "graph-var-work"
+version = 2
+contract = "graph.v2"
+
+[vars.subject]
+description = "Work subject"
+
+[[steps]]
+id = "step"
+title = "Do work"
+description = "Handle {{subject}} now."
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-var-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{
+		{Name: "var-patrol", Formula: "graph-var-work", Trigger: "cooldown", Interval: "15m", Pool: "fixture/quinn", FormulaLayer: formulaDir},
+	}
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunWithJSON(aa, "var-patrol", "", cityDir, beads.OrdersStore{Store: store}, eventLog, false, map[string]string{"subject": "widgets"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("store.ListOpen(): %v", err)
+	}
+
+	var root *beads.Bead
+	for i := range all {
+		if all[i].Title == "graph-var-work" {
+			root = &all[i]
+			break
+		}
+	}
+	if root == nil {
+		t.Fatalf("workflow root bead not found; beads=%#v", all)
+	}
+	raw := root.Metadata[graphv2.RuntimeVarsMetadataKey]
+	if raw == "" {
+		t.Fatalf("root bead %s metadata not stamped, want %s to persist caller vars", graphv2.RuntimeVarsMetadataKey, graphv2.RuntimeVarsMetadataKey)
+	}
+	got, err := graphv2.ParseRuntimeVarsMetadata(raw)
+	if err != nil {
+		t.Fatalf("ParseRuntimeVarsMetadata(%q): %v", raw, err)
+	}
+	if got["subject"] != "widgets" {
+		t.Fatalf("persisted runtime vars = %v, want subject=widgets", got)
+	}
+
+	var work *beads.Bead
+	for i := range all {
+		if all[i].Title == "Do work" {
+			work = &all[i]
+			break
+		}
+	}
+	if work == nil {
+		t.Fatalf("worker step bead not found; beads=%#v", all)
+	}
+	if want := "Handle widgets now."; work.Description != want {
+		t.Errorf("worker step description = %q, want %q (caller var must substitute into bead text)", work.Description, want)
 	}
 }
 
@@ -4023,6 +4287,137 @@ func TestOrderCheckCooldownStaleEventFallsThroughToLastRunStore(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "last run") {
 		t.Fatalf("stale event did not fall through to last-run store; expected last-run error in stderr:\n%s", stderr.String())
+	}
+}
+
+// --- gc order set-interval ---
+
+func TestOrderSetIntervalInvalidDuration(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSetInterval("digest", "not-a-duration", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("cmdOrderSetInterval = 0, want non-zero for invalid duration")
+	}
+	if !strings.Contains(stderr.String(), "invalid duration") {
+		t.Errorf("stderr = %q, want 'invalid duration'", stderr.String())
+	}
+}
+
+func TestOrderSetIntervalWritesCityToml(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test"
+prefix = "tt"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSetInterval("digest", "2h", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSetInterval = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "digest") || !strings.Contains(stdout.String(), "2h") {
+		t.Errorf("stdout = %q, missing order name or interval", stdout.String())
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig after set-interval: %v", err)
+	}
+	var found *config.OrderOverride
+	for i := range cfg.Orders.Overrides {
+		if cfg.Orders.Overrides[i].Name == "digest" {
+			found = &cfg.Orders.Overrides[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no override for 'digest' in city.toml after set-interval")
+	}
+	if found.Interval == nil || *found.Interval != "2h" {
+		t.Errorf("override.Interval = %v, want \"2h\"", found.Interval)
+	}
+}
+
+func TestOrderSetIntervalWithRigWritesCityToml(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test"
+prefix = "tt"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSetInterval("health-check", "30m", "frontend", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSetInterval = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "frontend") {
+		t.Errorf("stdout = %q, missing rig name", stdout.String())
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig after set-interval: %v", err)
+	}
+	var found *config.OrderOverride
+	for i := range cfg.Orders.Overrides {
+		if cfg.Orders.Overrides[i].Name == "health-check" && cfg.Orders.Overrides[i].Rig == "frontend" {
+			found = &cfg.Orders.Overrides[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no override for 'health-check' rig=frontend in city.toml after set-interval")
+	}
+	if found.Interval == nil || *found.Interval != "30m" {
+		t.Errorf("override.Interval = %v, want \"30m\"", found.Interval)
+	}
+}
+
+func TestOrderSetIntervalUpdatesExistingOverride(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test"
+prefix = "tt"
+
+[[orders.overrides]]
+name = "digest"
+interval = "24h"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSetInterval("digest", "12h", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSetInterval = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig after set-interval: %v", err)
+	}
+	var found *config.OrderOverride
+	for i := range cfg.Orders.Overrides {
+		if cfg.Orders.Overrides[i].Name == "digest" {
+			found = &cfg.Orders.Overrides[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no override for 'digest' after update")
+	}
+	if found.Interval == nil || *found.Interval != "12h" {
+		t.Errorf("override.Interval = %v, want \"12h\"", found.Interval)
+	}
+	overrideCount := 0
+	for _, ov := range cfg.Orders.Overrides {
+		if ov.Name == "digest" {
+			overrideCount++
+		}
+	}
+	if overrideCount != 1 {
+		t.Errorf("override count for 'digest' = %d, want 1 (no duplicates)", overrideCount)
 	}
 }
 

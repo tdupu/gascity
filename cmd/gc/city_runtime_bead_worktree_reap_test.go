@@ -112,3 +112,33 @@ func TestCityRuntimeTick_DryRunReapDeletesNothing(t *testing.T) {
 		t.Errorf("stderr = %q, want a dry-run would-reap line", stderr.String())
 	}
 }
+
+// TestLookupRigRoot covers the new helper introduced to fix the bead worktree
+// reaper using cityPath instead of the rig root for git worktree remove calls.
+func TestLookupRigRoot(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "hecke", Path: "/gt/hecke"},
+			{Name: "demo", Path: "  /gt/demo  "}, // leading/trailing space trimmed
+			{Name: "empty", Path: ""},
+		},
+	}
+	cases := []struct {
+		rigName string
+		want    string
+	}{
+		{"hecke", "/gt/hecke"},
+		{"demo", "/gt/demo"},  // whitespace trimmed
+		{"empty", ""},         // empty path → ""
+		{"missing", ""},       // not in config → ""
+		{"", ""},              // blank name → ""
+	}
+	for _, c := range cases {
+		t.Run(c.rigName, func(t *testing.T) {
+			got := lookupRigRoot(c.rigName, cfg)
+			if got != c.want {
+				t.Errorf("lookupRigRoot(%q) = %q, want %q", c.rigName, got, c.want)
+			}
+		})
+	}
+}

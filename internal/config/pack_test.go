@@ -1062,6 +1062,42 @@ func TestPackContentHashRecursiveCachesUnchangedTree(t *testing.T) {
 	}
 }
 
+// TestPackContentHashRecursiveDetectsMtimePreservingEdit reproduces ga-b675vk:
+// mtime-preserving deploy tooling (cp -p, rsync --checksum --times) can edit
+// file content without changing size or mtime, which previously let a stale
+// hash survive in the cache. ctime cannot be rolled back by any standard
+// syscall, so it must break the tie.
+func TestPackContentHashRecursiveDetectsMtimePreservingEdit(t *testing.T) {
+	ResetPackContentHashCache()
+	t.Cleanup(ResetPackContentHashCache)
+
+	dir := "/pack"
+	path := filepath.Join(dir, "pack.toml")
+	fs := fsys.NewFake()
+	fs.Dirs[dir] = true
+
+	if err := fs.WriteFile(path, []byte("name = \"a\""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h1 := PackContentHashRecursive(fs, dir)
+	origModTime := fs.ModTimes[path]
+
+	// Same size (10 bytes), different content, then mtime forced back to its
+	// original value — simulating tooling that preserves mtime across a
+	// content-changing write. ctime is deliberately left alone: Fake advances
+	// it on every WriteFile and never lets a test roll it back, mirroring the
+	// real kernel where no userspace syscall sets ctime.
+	if err := fs.WriteFile(path, []byte("name = \"b\""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs.ModTimes[path] = origModTime
+
+	h2 := PackContentHashRecursive(fs, dir)
+	if h2 == h1 {
+		t.Fatal("hash should change when content changes even though size and mtime match the cached fingerprint exactly (ctime must break the tie)")
+	}
+}
+
 func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "pack.toml", "test")
@@ -1083,9 +1119,33 @@ func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
 	writeFile(t, dir, "node_modules/lodash/index.js", "module.exports = {}")
 	writeFile(t, dir, "packages/foo/node_modules/lodash/index.js", "module.exports = {}")
 	writeFile(t, dir, "apps/bar/node_modules/.bun/install-cache.bin", "binary")
+	// Agent worktrees and test caches at any depth must be skipped for the
+	// same reason. Each .claude/worktrees/<name> is a full checkout of the
+	// pack tree, so a repo with N agent worktrees multiplies the walk by N+1
+	// and hashes content that cannot affect the running city. Measured on one
+	// deployment: 6,371 files across 8 worktrees against 1,115 files of real
+	// pack content -- 85% of every walk was agent checkouts, and the resulting
+	// startup walk exceeded the bead-store init deadline, making the city
+	// unbootable rather than merely slow.
+	writeFile(t, dir, ".claude/worktrees/agent-a/prompts/a.md", "worktree copy")
+	writeFile(t, dir, ".claude/worktrees/agent-b/pack.toml", "[pack]\nname = 'dup'")
+	writeFile(t, dir, "nested/.claude/worktrees/agent-c/prompts/a.md", "worktree copy")
+	writeFile(t, dir, ".pytest_cache/v/cache/lastfailed", "{}")
+	writeFile(t, dir, "nested/.pytest_cache/v/cache/nodeids", "[]")
 	h2 := PackContentHashRecursive(fsys.OSFS{}, dir)
 	if h2 != h1 {
 		t.Fatalf("hash changed after runtime output writes: %q vs %q", h1, h2)
+	}
+
+	// The worktree skip is scoped to .claude/worktrees, NOT all of .claude:
+	// .claude/skills is real pack content in some checkout layouts. Skipping
+	// the whole directory would drop skills from the hash silently -- editing
+	// a skill would not mark the pack dirty, and agents would keep loading the
+	// stale copy with nothing reporting an error.
+	writeFile(t, dir, ".claude/skills/example.contributing/SKILL.md", "skill body")
+	hSkill := PackContentHashRecursive(fsys.OSFS{}, dir)
+	if hSkill == h1 {
+		t.Fatal("hash must change for .claude/skills content: skills are pack content, only .claude/worktrees is runtime")
 	}
 
 	writeFile(t, dir, "prompts/state/example.md", "state prompt")
