@@ -1094,30 +1094,3 @@ func shortCircuitAlreadyStartingOrRunning(cityPath, nameOverride string, stdout,
 	}
 	return true, 0
 }
-
-// resolveSupervisorCityStartWait resolves the readiness-wait deadline for
-// gc start/register/init. Precedence: an explicit --timeout on gc start,
-// then an explicit daemon.start_ready_timeout in city.toml (the existing,
-// still-honored config knob -- session.startup_timeout continues to extend
-// it, per supervisorCityStartTimeout), then unbounded. A bare package
-// default with nothing explicitly configured is deliberately no longer used
-// as a hard deadline: a large city can legitimately take far longer than any
-// constant anyone picks in advance (#5379), so gc start now waits loudly
-// instead of false-fataling.
-func resolveSupervisorCityStartWait(cityPath string) (timeout time.Duration, hasDeadline bool) {
-	if startTimeoutFlagSet {
-		return startTimeoutFlag, true
-	}
-	if supervisorCityStartTimeoutExplicit(cityPath) {
-		return supervisorCityStartTimeout(cityPath), true
-	}
-	return 0, false
-}
-
-// supervisorCityStartTimeoutExplicit reports whether the operator configured
-// daemon.start_ready_timeout in city.toml -- the canonical, deliberate
-// opt-in into a start-readiness deadline (see supervisorCityStartTimeout).
-func supervisorCityStartTimeoutExplicit(cityPath string) bool {
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	return err == nil && cfg.Daemon.StartReadyTimeout != ""
-}
