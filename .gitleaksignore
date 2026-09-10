@@ -37,3 +37,4 @@ f8b51359ba093cfe5b9b90697b2f25a94b90fb0d:internal/worker/invocation_telemetry_us
 # (secret strings intentionally not quoted here — that would re-trip the scanner.)
 3daba00277e51bbf1de230c11cd966e33e6e3d39:internal/storebinding/provider_endpoint_test.go:generic-api-key:84
 ad4d0ab4a9e14f57faed3eaa20a658ef743e1c09:cmd/gc/usage_compute_test.go:generic-api-key:306
+812e50e1d5b3a6902025f2e11175aeb11ed31140:internal/session/manager_test.go:generic-api-key:2472
