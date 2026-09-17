@@ -2456,7 +2456,7 @@ func TestUnloadSupervisorServiceDarwinDisablesBootsOutAndVerifiesAbsent(t *testi
 		calls = append(calls, strings.Join(args, " "))
 		return nil
 	}
-	supervisorLaunchdLoaded = func(string) (bool, string) { return false, "" }
+	supervisorLaunchdLoaded = func(string) (bool, bool, string) { return false, true, "" }
 	t.Cleanup(func() {
 		supervisorLaunchctlRun = oldRun
 		supervisorLaunchdLoaded = oldLoaded
@@ -2464,6 +2464,9 @@ func TestUnloadSupervisorServiceDarwinDisablesBootsOutAndVerifiesAbsent(t *testi
 
 	if err := unloadSupervisorService(); err != nil {
 		t.Fatalf("unloadSupervisorService returned error: %v", err)
+	}
+	if err := verifySupervisorServiceStopped(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("verifySupervisorServiceStopped returned error: %v", err)
 	}
 
 	target := supervisorLaunchdServiceTarget(supervisorLaunchdLabel())
@@ -2506,12 +2509,12 @@ func TestUnloadSupervisorServiceDarwinWaitsThroughSIGTERMedUntilAbsent(t *testin
 		calls = append(calls, strings.Join(args, " "))
 		return nil
 	}
-	supervisorLaunchdLoaded = func(label string) (bool, string) {
+	supervisorLaunchdLoaded = func(label string) (bool, bool, string) {
 		checks++
 		if checks < 3 {
-			return true, "state = SIGTERMed\npid = 4242\nlabel = " + label
+			return true, false, "state = SIGTERMed\npid = 4242\nlabel = " + label
 		}
-		return false, ""
+		return false, true, ""
 	}
 	supervisorLaunchdStopTimeout = time.Second
 	supervisorLaunchdStopPollInterval = time.Millisecond
@@ -2524,6 +2527,12 @@ func TestUnloadSupervisorServiceDarwinWaitsThroughSIGTERMedUntilAbsent(t *testin
 
 	if err := unloadSupervisorService(); err != nil {
 		t.Fatalf("unloadSupervisorService returned error: %v", err)
+	}
+	if checks != 0 {
+		t.Fatalf("unloadSupervisorService probed launchd %d times, want the poll to stay in verifySupervisorServiceStopped", checks)
+	}
+	if err := verifySupervisorServiceStopped(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("verifySupervisorServiceStopped returned error: %v", err)
 	}
 	if checks < 3 {
 		t.Fatalf("launchd loaded checks = %d, want polling through SIGTERMed", checks)
@@ -2560,8 +2569,8 @@ func TestUnloadSupervisorServiceDarwinFailsWhenTargetStillLoaded(t *testing.T) {
 	oldTimeout := supervisorLaunchdStopTimeout
 	oldPoll := supervisorLaunchdStopPollInterval
 	supervisorLaunchctlRun = func(_ ...string) error { return nil }
-	supervisorLaunchdLoaded = func(label string) (bool, string) {
-		return true, "state = running\npid = 4242\nlabel = " + label
+	supervisorLaunchdLoaded = func(label string) (bool, bool, string) {
+		return true, false, "state = running\npid = 4242\nlabel = " + label
 	}
 	supervisorLaunchdStopTimeout = 5 * time.Millisecond
 	supervisorLaunchdStopPollInterval = time.Millisecond
@@ -2572,15 +2581,146 @@ func TestUnloadSupervisorServiceDarwinFailsWhenTargetStillLoaded(t *testing.T) {
 		supervisorLaunchdStopPollInterval = oldPoll
 	})
 
-	err := unloadSupervisorService()
+	if err := unloadSupervisorService(); err != nil {
+		t.Fatalf("unloadSupervisorService returned error: %v", err)
+	}
+	err := verifySupervisorServiceStopped(time.Now().Add(5 * time.Millisecond))
 	if err == nil {
-		t.Fatal("unloadSupervisorService returned nil, want loaded launchd target failure")
+		t.Fatal("verifySupervisorServiceStopped returned nil, want loaded launchd target failure")
 	}
 	got := err.Error()
 	for _, want := range []string{"launchd target", "still loaded", supervisorLaunchdLabel(), "pid = 4242"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("error = %q, want %q", got, want)
 		}
+	}
+}
+
+// TestVerifySupervisorServiceStoppedDarwinFailsWhenAbsenceUnconfirmed is the
+// regression guard for the tri-state probe: a `launchctl print` that fails
+// for an unrelated reason is not evidence the job is gone, so the absence
+// postcondition must not pass on it.
+func TestVerifySupervisorServiceStoppedDarwinFailsWhenAbsenceUnconfirmed(t *testing.T) {
+	if goruntime.GOOS != "darwin" {
+		t.Skip("launchd path only applies on darwin")
+	}
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	path := supervisorLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("<plist/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLoaded := supervisorLaunchdLoaded
+	oldTimeout := supervisorLaunchdStopTimeout
+	oldPoll := supervisorLaunchdStopPollInterval
+	supervisorLaunchdLoaded = func(string) (bool, bool, string) {
+		return false, false, "Bootstrap failed: 5: Input/output error"
+	}
+	supervisorLaunchdStopTimeout = 5 * time.Millisecond
+	supervisorLaunchdStopPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorLaunchdLoaded = oldLoaded
+		supervisorLaunchdStopTimeout = oldTimeout
+		supervisorLaunchdStopPollInterval = oldPoll
+	})
+
+	err := verifySupervisorServiceStopped(time.Now().Add(5 * time.Millisecond))
+	if err == nil {
+		t.Fatal("verifySupervisorServiceStopped returned nil for an unknown probe result, want failure")
+	}
+	for _, want := range []string{"could not be confirmed unloaded", supervisorLaunchdLabel(), "Input/output error"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+// TestVerifySupervisorServiceStoppedDarwinHonorsShorterCallerDeadline pins
+// that the absence poll returns by the caller's --wait-timeout deadline
+// even when that deadline is shorter than supervisorLaunchdStopTimeout.
+// The check shares the caller's budget; it must never silently extend it,
+// which would make stop block past the documented timeout.
+func TestVerifySupervisorServiceStoppedDarwinHonorsShorterCallerDeadline(t *testing.T) {
+	if goruntime.GOOS != "darwin" {
+		t.Skip("launchd path only applies on darwin")
+	}
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	path := supervisorLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("<plist/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLoaded := supervisorLaunchdLoaded
+	oldTimeout := supervisorLaunchdStopTimeout
+	oldPoll := supervisorLaunchdStopPollInterval
+	supervisorLaunchdLoaded = func(label string) (bool, bool, string) {
+		return true, false, "state = running\npid = 4242\nlabel = " + label
+	}
+	supervisorLaunchdStopTimeout = 45 * time.Second
+	supervisorLaunchdStopPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorLaunchdLoaded = oldLoaded
+		supervisorLaunchdStopTimeout = oldTimeout
+		supervisorLaunchdStopPollInterval = oldPoll
+	})
+
+	callerBudget := 20 * time.Millisecond
+	start := time.Now()
+	err := verifySupervisorServiceStopped(start.Add(callerBudget))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("verifySupervisorServiceStopped returned nil for a still-loaded target, want failure")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("absence poll took %s for a caller budget of %s, want it bounded by the caller deadline rather than supervisorLaunchdStopTimeout (%s)", elapsed, callerBudget, supervisorLaunchdStopTimeout)
+	}
+}
+
+// stubExitError carries a process exit status the way *exec.ExitError
+// does, so the exit-code branch of launchdPrintReportsNotFound is covered
+// without spawning a subprocess.
+type stubExitError struct{ code int }
+
+func (e stubExitError) Error() string { return "exit status " + strconv.Itoa(e.code) }
+
+func (e stubExitError) ExitCode() int { return e.code }
+
+// TestLaunchdPrintReportsNotFound pins which `launchctl print` failures
+// count as proof the service is absent. Anything else is "unknown".
+func TestLaunchdPrintReportsNotFound(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		detail string
+		want   bool
+	}{
+		{name: "not found message", err: errors.New("exit status 113"), detail: "Could not find service \"com.gastownhall.gc.supervisor\" in domain for login", want: true},
+		{name: "permission denied", err: errors.New("exit status 1"), detail: "Operation not permitted"},
+		{name: "no aqua session", err: errors.New("exit status 5"), detail: "Bootstrap failed: 5: Input/output error"},
+		{name: "launchctl missing", err: errors.New("exec: \"launchctl\": executable file not found in $PATH")},
+		{name: "exit status 113 without output", err: stubExitError{code: launchdPrintNotFoundExitCode}, want: true},
+		{name: "other exit status without output", err: stubExitError{code: 1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := launchdPrintReportsNotFound(tc.err, tc.detail); got != tc.want {
+				t.Fatalf("launchdPrintReportsNotFound(%v, %q) = %v, want %v", tc.err, tc.detail, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -4800,10 +4940,7 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	var stderr bytes.Buffer
 	start := time.Now()
 	err := stopManagedCity(mc, cityPath, &stderr)
-	// 2s proves the 20ms timeouts governed the stop while absorbing
-	// process-spawn overhead that pushes slower hosts past a sub-second
-	// bound.
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("stopManagedCity took %s, want bounded timeout", elapsed)
 	}
 	if err == nil {
@@ -4908,10 +5045,7 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	var stderr bytes.Buffer
 	start := time.Now()
 	err := stopManagedCity(mc, cityPath, &stderr)
-	// 2s proves the 20ms shutdown timeout governed the stop (not the 3m
-	// startup or 2m drift timeouts) while absorbing process-spawn overhead
-	// that pushes slower hosts past a sub-second bound.
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("stopManagedCity took %s, want shutdown-timeout bound", elapsed)
 	}
 	if err == nil {
@@ -4926,6 +5060,81 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 
 	ops := readOpLog(t, logFile)
 	assertSingleStopWithBenignNoise(t, ops)
+}
+
+// hangingListProvider wraps a runtime.Provider but makes ListRunning block
+// forever. This simulates a session/beads dependency call inside
+// CityRuntime.shutdown that never returns (#5256) — ListRunning has no
+// context argument, so nothing can bound or cancel it from outside.
+type hangingListProvider struct {
+	runtime.Provider
+}
+
+func (hangingListProvider) ListRunning(string) ([]string, error) {
+	select {}
+}
+
+func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
+	cityPath := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := writeSpyScript(t, logFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	closer := &closerSpy{}
+	forceStop := &atomic.Bool{}
+	mc := &managedCity{
+		name:   "bright-lights",
+		cancel: func() {},
+		done:   make(chan struct{}), // never closes: city never exits on its own
+		closer: closer,
+		cr: &CityRuntime{
+			cfg: &config.City{
+				Daemon: config.DaemonConfig{
+					ShutdownTimeout: "20ms",
+				},
+			},
+			sp:                hangingListProvider{Provider: runtime.NewFake()},
+			rec:               events.Discard,
+			stdout:            io.Discard,
+			stderr:            io.Discard,
+			forceStopShutdown: forceStop,
+		},
+	}
+
+	var stderr bytes.Buffer
+	result := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		result <- stopManagedCity(mc, cityPath, &stderr)
+	}()
+
+	select {
+	case err := <-result:
+		// ShutdownTimeout is 20ms, so the forced-stop timeout (5x) is
+		// 100ms: the promised ceiling is grace(20ms) + forced(100ms) =
+		// 120ms. A double wait on the forced timeout — the regression
+		// this test guards against — pushes that to ~220ms, so the bound
+		// here must sit strictly below that, not at the old, much looser
+		// 500ms that a doubled wait still passed.
+		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+			t.Fatalf("stopManagedCity took %s, want bounded near grace+forced (~120ms) even when CityRuntime.shutdown hangs", elapsed)
+		}
+		if err == nil {
+			t.Fatal("stopManagedCity err = nil, want non-nil because city never exited and shutdown hung")
+		}
+		if !strings.Contains(err.Error(), "did not exit") {
+			t.Fatalf("stopManagedCity err = %q, want 'did not exit' detail", err.Error())
+		}
+		if !forceStop.Load() {
+			t.Fatal("expected forced cleanup to request force-stop shutdown")
+		}
+		if !closer.closed {
+			t.Fatal("expected closer to be closed even though CityRuntime.shutdown never returned")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stopManagedCity did not return within 2s: forced shutdown is not bounded when CityRuntime.shutdown hangs (issue #5256)")
+	}
 }
 
 func TestCityRuntimeShutdownPreservesSessionsWhenRequested(t *testing.T) {
@@ -5926,6 +6135,153 @@ func TestStopSupervisorWithWaitPropagatesDoneErr(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Supervisor stopped.") {
 		t.Fatalf("stdout unexpectedly contains 'Supervisor stopped.' — shutdown reported errors")
+	}
+}
+
+// TestStopSupervisorWithWaitSucceedsWhenServiceAbsenceConfirmed covers the
+// happy half of the split: unload reports no command errors and the absence
+// verifier positively confirms the service is gone, so stop exits 0.
+func TestStopSupervisorWithWaitSucceedsWhenServiceAbsenceConfirmed(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	oldUnload := unloadSupervisorServiceHook
+	oldVerify := verifySupervisorServiceStoppedHook
+	var verified int
+	unloadSupervisorServiceHook = func() error { return nil }
+	verifySupervisorServiceStoppedHook = func(time.Time) error {
+		verified++
+		return nil
+	}
+	t.Cleanup(func() {
+		unloadSupervisorServiceHook = oldUnload
+		verifySupervisorServiceStoppedHook = oldVerify
+	})
+
+	var stopped atomic.Bool
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		switch cmd {
+		case "ping":
+			if stopped.Load() {
+				return ""
+			}
+			return "4242\n"
+		case "stop":
+			stopped.Store(true)
+			return "ok\ndone:ok\n"
+		}
+		return ""
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := stopSupervisorWithWait(&stdout, &stderr, true, 2*time.Second)
+
+	if code != 0 {
+		t.Fatalf("stopSupervisorWithWait code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if verified != 1 {
+		t.Fatalf("absence verifier ran %d times, want exactly 1", verified)
+	}
+	if !strings.Contains(stdout.String(), "Supervisor stopped.") {
+		t.Fatalf("stdout = %q, want it to report the supervisor stopped", stdout.String())
+	}
+}
+
+// TestStopSupervisorWithWaitFailsWhenServiceAbsenceUnconfirmed is the
+// load-bearing case: the unload commands all succeeded, but the platform
+// service could not be confirmed gone. That must not read as success.
+func TestStopSupervisorWithWaitFailsWhenServiceAbsenceUnconfirmed(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	oldUnload := unloadSupervisorServiceHook
+	oldVerify := verifySupervisorServiceStoppedHook
+	unloadSupervisorServiceHook = func() error { return nil }
+	verifySupervisorServiceStoppedHook = func(time.Time) error {
+		return errors.New("launchd target could not be confirmed unloaded after stop")
+	}
+	t.Cleanup(func() {
+		unloadSupervisorServiceHook = oldUnload
+		verifySupervisorServiceStoppedHook = oldVerify
+	})
+
+	var stopped atomic.Bool
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		switch cmd {
+		case "ping":
+			if stopped.Load() {
+				return ""
+			}
+			return "4242\n"
+		case "stop":
+			stopped.Store(true)
+			return "ok\ndone:ok\n"
+		}
+		return ""
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := stopSupervisorWithWait(&stdout, &stderr, true, 2*time.Second)
+
+	if code != 1 {
+		t.Fatalf("stopSupervisorWithWait code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "platform service did not stop durably") ||
+		!strings.Contains(stderr.String(), "could not be confirmed unloaded") {
+		t.Fatalf("stderr = %q, want the unconfirmed-absence failure", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Supervisor stopped.") {
+		t.Fatalf("stdout unexpectedly reports success when absence was unconfirmed: %q", stdout.String())
+	}
+}
+
+// TestStopSupervisorWithoutWaitSkipsServiceAbsenceVerification guards the
+// documented async contract: without --wait, stop returns as soon as the
+// supervisor acknowledges, so it must not block on the absence poll.
+func TestStopSupervisorWithoutWaitSkipsServiceAbsenceVerification(t *testing.T) {
+	gcHome := shortTempDir(t, "gc-home-")
+	runtimeDir := shortTempDir(t, "gc-run-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	oldUnload := unloadSupervisorServiceHook
+	oldVerify := verifySupervisorServiceStoppedHook
+	var verified int
+	unloadSupervisorServiceHook = func() error { return nil }
+	verifySupervisorServiceStoppedHook = func(time.Time) error {
+		verified++
+		return errors.New("absence poll must not run on the async path")
+	}
+	t.Cleanup(func() {
+		unloadSupervisorServiceHook = oldUnload
+		verifySupervisorServiceStoppedHook = oldVerify
+	})
+
+	sockPath := filepath.Join(gcHome, "supervisor.sock")
+	startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+		switch cmd {
+		case "ping":
+			return "4242\n"
+		case "stop":
+			return "ok\n"
+		}
+		return ""
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := stopSupervisorWithWait(&stdout, &stderr, false, 2*time.Second)
+
+	if code != 0 {
+		t.Fatalf("stopSupervisorWithWait code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if verified != 0 {
+		t.Fatalf("absence verifier ran %d times without --wait, want 0", verified)
 	}
 }
 

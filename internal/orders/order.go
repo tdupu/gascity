@@ -99,6 +99,21 @@ type Order struct {
 	// is the author's responsibility: the order must be self-idempotent
 	// or interval-bounded, since no gate prevents an overlapping re-run.
 	NoWorkGate bool `toml:"no_work_gate,omitempty"`
+	// ReservedDispatch opts an order into the dispatcher's bounded
+	// reserved-capacity lane: a small, capped budget of dispatch slots set
+	// aside so core fleet-health orders (beads-health, gate-sweep,
+	// dolt-health) always get to run even when general dispatch capacity is
+	// saturated. Declaring this in TOML is the only way to grant reserved
+	// eligibility — the dispatcher must never name-match specific order
+	// names or maintain a multi-level priority system in Go. Defaults to
+	// false: every order is opted out unless it explicitly sets
+	// reserved_dispatch = true. A higher-priority formula layer that
+	// redefines an order by name replaces it wholesale (see scanner.go),
+	// so reserved eligibility is inherited only by explicit redeclaration,
+	// never implicitly by name. The actual capped-budget dispatch behavior
+	// is implemented separately (gastownhall/gascity ga-1ocm3f); this field
+	// only declares eligibility.
+	ReservedDispatch bool `toml:"reserved_dispatch,omitempty"`
 	// Env is a map of environment variables exported into an exec
 	// order's child process. Use the `[order.env]` TOML table to
 	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
@@ -167,6 +182,7 @@ type orderDecode struct {
 	Enabled          *bool                 `toml:"enabled,omitempty"`
 	Idempotent       bool                  `toml:"idempotent,omitempty"`
 	NoWorkGate       bool                  `toml:"no_work_gate,omitempty"`
+	ReservedDispatch bool                  `toml:"reserved_dispatch,omitempty"`
 	Env              map[string]string     `toml:"env,omitempty"`
 	Params           map[string]OrderParam `toml:"params,omitempty"`
 	SkipAliases      []string              `toml:"skip_aliases,omitempty"`
@@ -199,6 +215,7 @@ func (d orderDecode) normalized() Order {
 		Enabled:          d.Enabled,
 		Idempotent:       d.Idempotent,
 		NoWorkGate:       d.NoWorkGate,
+		ReservedDispatch: d.ReservedDispatch,
 		Env:              d.Env,
 		Params:           d.Params,
 		skipAliases:      d.SkipAliases,
@@ -368,6 +385,12 @@ func Validate(a Order) error {
 	case "cron":
 		if a.Schedule == "" {
 			return fmt.Errorf("order %q: cron trigger requires schedule", a.Name)
+		}
+		// An unparseable schedule must fail loudly at discovery, the same way
+		// a bad tz does. The runtime matcher can only report such a field as
+		// "not matched", which yields an order that silently never fires.
+		if err := ValidateCronSchedule(a.Schedule); err != nil {
+			return fmt.Errorf("order %q: invalid schedule %q: %w", a.Name, a.Schedule, err)
 		}
 	case "condition":
 		if a.Check == "" {
