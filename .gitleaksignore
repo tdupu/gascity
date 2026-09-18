@@ -38,3 +38,24 @@ f8b51359ba093cfe5b9b90697b2f25a94b90fb0d:internal/worker/invocation_telemetry_us
 3daba00277e51bbf1de230c11cd966e33e6e3d39:internal/storebinding/provider_endpoint_test.go:generic-api-key:84
 ad4d0ab4a9e14f57faed3eaa20a658ef743e1c09:cmd/gc/usage_compute_test.go:generic-api-key:306
 812e50e1d5b3a6902025f2e11175aeb11ed31140:internal/session/manager_test.go:generic-api-key:2472
+
+# 2026-09-17 upstream (gastownhall) findings surfaced by the 207-commit upstream
+# reconcile merge (dcfa836a2). Both hits are the SAME value, twice, in one
+# upstream test file, from upstream commit abb88d895 (2026-09-10, Brandon
+# Dennis) -- not local-authored, and already public in gastownhall/gascity.
+#
+# Honest caveat, differing from the batches above: those were verifiably
+# synthetic (RFC-example / UUIDv7 fixtures). This one is NOT obviously
+# synthetic -- the source comment calls it "a healthy provider-minted OpenCode
+# key, as captured by `gc prime --hook`", i.e. captured from a real session
+# rather than fabricated. The commit's own narrative describes that key being
+# overwritten across five city restarts, so it is very likely dead.
+#
+# Allowlisted here because the push adds NO new exposure: both tdupu/gascity
+# and gastownhall/gascity are public, and the value is already published
+# upstream. That is a statement about our marginal risk, NOT a clean bill of
+# health -- if it is live, the fix is upstream's to make and the disclosure is
+# upstream's to receive. Flagged to Taylor 2026-09-17.
+# (secret string intentionally not quoted here -- that would re-trip the scanner.)
+abb88d89537caed5afe76d4afb8af66b06acf3e2:cmd/gc/session_reconciler_drift_resume_test.go:generic-api-key:433
+abb88d89537caed5afe76d4afb8af66b06acf3e2:cmd/gc/session_reconciler_drift_resume_test.go:generic-api-key:461
