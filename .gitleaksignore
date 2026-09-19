@@ -59,3 +59,17 @@ ad4d0ab4a9e14f57faed3eaa20a658ef743e1c09:cmd/gc/usage_compute_test.go:generic-ap
 # (secret string intentionally not quoted here -- that would re-trip the scanner.)
 abb88d89537caed5afe76d4afb8af66b06acf3e2:cmd/gc/session_reconciler_drift_resume_test.go:generic-api-key:433
 abb88d89537caed5afe76d4afb8af66b06acf3e2:cmd/gc/session_reconciler_drift_resume_test.go:generic-api-key:461
+
+# 2026-09-18 upstream (gastownhall) findings from the second reconcile merge
+# (b1ad62fcb, 25 commits). Both hits are in upstream's
+# cmd/gc/adoption_barrier_test.go, commit 9877ab556 (Jim Wordelman), not
+# local-authored and already public in gastownhall/gascity.
+#
+# VERIFIED SYNTHETIC, unlike the 2026-09-17 batch: the value is a
+# `const liveToken` fed to a fakeAdoptionProvider against
+# beads.NewMemStore() — test scaffolding with no live counterpart. The
+# test's own comment explains the constant exists precisely so the fixture
+# does NOT fabricate a random token per run.
+# (secret string intentionally not quoted here — that would re-trip the scanner.)
+9877ab55656f8c2698a82dab537e9eaad99a5866:cmd/gc/adoption_barrier_test.go:generic-api-key:247
+9877ab55656f8c2698a82dab537e9eaad99a5866:cmd/gc/adoption_barrier_test.go:generic-api-key:323
