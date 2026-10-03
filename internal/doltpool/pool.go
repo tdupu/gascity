@@ -113,12 +113,43 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening pooled dolt connection to %s:%s/%s: %w", host, port, database, err)
 	}
+	configurePool(db)
+	registry.dbs[k] = db
+	return db, nil
+}
+
+// OpenSocket returns a shared *sql.DB for a Dolt Unix-socket endpoint.
+func OpenSocket(socket, user, password, database string) (*sql.DB, error) {
+	k := key("unix", socket, user, password, database)
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if db, ok := registry.dbs[k]; ok {
+		return db, nil
+	}
+	cfg := mysql.NewConfig()
+	cfg.User, cfg.Passwd, cfg.Net, cfg.Addr, cfg.DBName = user, password, "unix", socket, database
+	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = connTimeout, readTimeout, writeTimeout
+	cfg.AllowNativePasswords = true
+	cfg.ParseTime = true
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("opening pooled dolt socket connection %s/%s: %w", socket, database, err)
+	}
+	configurePool(db)
+	registry.dbs[k] = db
+	return db, nil
+}
+
+// configurePool applies the per-endpoint caps to a new pooled handle. TCP and
+// Unix-socket pools share it so neither can drift from the other: the socket
+// path once skipped the idle bound, so its idle connections lived until
+// connMaxLifetime and the server reaped them first, and every reuse logged
+// "closing bad idle connection: EOF" from the driver.
+func configurePool(db *sql.DB) {
 	db.SetMaxOpenConns(maxOpenConns)
 	db.SetMaxIdleConns(maxIdleConns)
 	db.SetConnMaxLifetime(connMaxLifetime)
 	db.SetConnMaxIdleTime(connMaxIdleTime)
-	registry.dbs[k] = db
-	return db, nil
 }
 
 // Shutdown closes all pooled connections and empties the registry. Call

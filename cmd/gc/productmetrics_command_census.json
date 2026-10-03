@@ -240,6 +240,21 @@
       "id": 3
     },
     {
+      "path": "gc beads city migrate-proxied",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-city-migrate-proxied",
+      "owner": "immediate",
+      "id": 208
+    },
+    {
       "path": "gc beads city use-external",
       "aliases": [],
       "conditional_modes": [],
@@ -2720,21 +2735,6 @@
       "classification": "order-run",
       "owner": "immediate",
       "id": 95
-    },
-    {
-      "path": "gc order set-interval",
-      "aliases": [],
-      "conditional_modes": [],
-      "hidden": false,
-      "effective_hidden": false,
-      "disable_flag_parsing": false,
-      "shape": "runnable",
-      "recording_policy": "recordable",
-      "mode": "standard",
-      "notice_policy": "eligible",
-      "classification": "order-set-interval",
-      "owner": "immediate",
-      "id": 208
     },
     {
       "path": "gc order show",

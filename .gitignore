@@ -90,3 +90,12 @@ __pycache__/
 # Gas City
 .beads/*
 !.beads/identity.toml
+# Bazel convenience symlinks
+/bazel-bin
+/bazel-out
+/bazel-testlogs
+# Bazel creates a bazel-<workspace-dir> convenience symlink per checkout.
+/bazel-*
+
+# Machine-local bazel config (remote executor endpoints, mTLS paths)
+.bazelrc.local

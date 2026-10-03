@@ -218,7 +218,7 @@
               "worktree-verify",
               "storage-preflight",
               "nudge-drop",
-              "order-set-interval"
+              "beads-city-migrate-proxied"
             ]
           },
           "event_id": {

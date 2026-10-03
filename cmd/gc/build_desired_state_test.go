@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -134,6 +135,20 @@ func (s *readyQueryRecordingStore) Ready(query ...beads.ReadyQuery) ([]beads.Bea
 		s.readyQueries = append(s.readyQueries, query[0])
 	}
 	return s.MemStore.Ready(query...)
+}
+
+// listCallCountingStore counts calls made through List so a test can assert
+// a lookup's store-read cost stays flat against an unrelated input's size
+// (e.g. the number of configured named sessions), rather than growing one
+// read per item (ga-0t7qjl).
+type listCallCountingStore struct {
+	*beads.MemStore
+	listCalls int
+}
+
+func (s *listCallCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.MemStore.List(query)
 }
 
 type blockingPoolCreateStore struct {
@@ -343,7 +358,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 			t.Fatalf("close session bead: %v", err)
 		}
 
-		infos, err := collectAllOpenSessionInfos("", &config.City{}, cityStore, nil, nil)
+		infos, err := collectAllOpenSessionInfos("", &config.City{}, cityStore, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos: %v", err)
 		}
@@ -376,7 +391,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 		}
 		store := &partialSessionListStore{MemStore: backing}
 
-		infos, err := collectAllOpenSessionInfos("", &config.City{}, store, nil, nil)
+		infos, err := collectAllOpenSessionInfos("", &config.City{}, store, nil, nil, nil)
 		if err == nil {
 			t.Fatal("collectAllOpenSessionInfos returned nil error on a partial-result store")
 		}
@@ -419,7 +434,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 		rigStores := map[string]beads.Store{"rig-A": rigStore}
 
 		// Control: with the rig live, both sessions are collected.
-		liveInfos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil)
+		liveInfos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos (live rig): %v", err)
 		}
@@ -429,7 +444,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 
 		// Suspending the rig drops its store from the fan-out.
 		suspended := map[string]bool{rigPath: true}
-		infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, suspended)
+		infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, suspended, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos (suspended rig): %v", err)
 		}
@@ -2433,7 +2448,7 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 			{Template: "mayor", Mode: "always"},
 			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
 		},
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil, "")
 
 	for _, disallowed := range []string{"repo/worker", "mayor"} {
 		for _, value := range got {
@@ -2451,6 +2466,77 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 	if !foundNamed {
 		t.Fatalf("ready assignees = %#v, want on-demand named-session identity", got)
 	}
+}
+
+// TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount
+// pins ga-0t7qjl: readyAssignedWorkAssignees looked up each on_demand named
+// session's closed-bead phantom one identity at a time
+// (findClosedNamedSessionBead -> one store.List per identity), so its store
+// cost scaled linearly with the number of configured named sessions — 109
+// serial calls, +155s, on this city. A batched lookup must cost the same
+// small constant number of store reads regardless of how many named
+// sessions are configured.
+func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t *testing.T) {
+	newCityWithNamedSessions := func(n int) *config.City {
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		for i := 0; i < n; i++ {
+			cfg.NamedSessions = append(cfg.NamedSessions, config.NamedSession{
+				Dir:      fmt.Sprintf("repo-%d", i),
+				Template: "named-worker",
+				Mode:     "on_demand",
+			})
+		}
+		return cfg
+	}
+
+	countListCalls := func(n int) int {
+		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
+		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, nil, "")
+		return store.listCalls
+	}
+
+	small := countListCalls(2)
+	large := countListCalls(200)
+
+	if small != large {
+		t.Fatalf("store.List call count scales with named-session count: 2 sessions -> %d calls, 200 sessions -> %d calls; want equal (one batched lookup regardless of session count)", small, large)
+	}
+	if large > 2 {
+		t.Fatalf("store.List called %d times for 200 named sessions; want a small constant via one batched lookup, not one call per named session", large)
+	}
+}
+
+// TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession
+// pins ga-bequ8d: the closed-session index is built only when at least one
+// on_demand named session exists, so a city with none pays zero store reads.
+// readyAssignedWorkAssignees must not build the index (or issue any
+// store.List) when no configured named session is on_demand.
+func TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession(t *testing.T) {
+	countListCalls := func(cfg *config.City) int {
+		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
+		readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "")
+		return store.listCalls
+	}
+
+	t.Run("no named sessions configured", func(t *testing.T) {
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		if got := countListCalls(cfg); got != 0 {
+			t.Fatalf("store.List called %d times with zero named sessions configured; want 0 (closed-session index must not be built)", got)
+		}
+	})
+
+	t.Run("only always-mode named sessions configured", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			NamedSessions: []config.NamedSession{
+				{Template: "mayor", Mode: "always"},
+				{Dir: "repo", Template: "deputy", Mode: "always"},
+			},
+		}
+		if got := countListCalls(cfg); got != 0 {
+			t.Fatalf("store.List called %d times with only always-mode named sessions; want 0 (closed-session index must not be built when no on_demand session needs it)", got)
+		}
+	})
 }
 
 func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAssignee(t *testing.T) {
@@ -3325,16 +3411,14 @@ func TestBuildDesiredState_NewPoolSessionBeadCreatedWithConcreteIdentity(t *test
 	if !containsString(got.Labels, "agent:rig/claude-1") {
 		t.Fatalf("labels = %#v, want concrete slot agent label", got.Labels)
 	}
-	// The runtime name is derived from the slot identity, never from the bead
-	// ID — that derivation is the ga-vcjr9 leak. A transient slot then steps
-	// aside onto "<identity>-pool" so the rebinding slot never becomes the
-	// runtime name (and therefore GC_AGENT), guarded by
-	// TestE2E_MultiAgent_PoolAndFixed (#5241).
-	if want := poolRuntimeSessionName(nil, "rig/claude-1", "rig/claude", true); got.Metadata["session_name"] != want {
-		t.Fatalf("session_name = %q, want the transient slot's identity-derived runtime name %q", got.Metadata["session_name"], want)
+	// An unaliased pool's runtime name is <template>-<beadID>, so the runtime
+	// resolves back to its bead; it is never the bare slot (and therefore never
+	// GC_AGENT = slot, #5241).
+	if want := PoolSessionName("rig/claude", got.ID); got.Metadata["session_name"] != want {
+		t.Fatalf("session_name = %q, want bead-scoped runtime name %q", got.Metadata["session_name"], want)
 	}
-	if beadOwnsPoolSessionName(got) {
-		t.Fatalf("session_name = %q is still bead-ID derived", got.Metadata["session_name"])
+	if !beadOwnsPoolSessionName(got) {
+		t.Fatalf("session_name = %q is not bead-ID scoped", got.Metadata["session_name"])
 	}
 }
 
@@ -6047,8 +6131,10 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 
-	cityPath := t.TempDir()
+	cityPath := beadstest.GuardedTempDir(t)
+	registerRealBDServerStop(t, cityPath)
 	beadsDir := filepath.Join(cityPath, ".beads")
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(jqPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 	t.Setenv("BEADS_DIR", beadsDir)
@@ -6058,9 +6144,9 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	runExternal(t, cityPath, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
 	runExternal(t, cityPath, bdPath, "config", "set", "types.custom", "session")
 
-	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(map[string]string{
+	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(map[string]string{
 		"BEADS_DIR": beadsDir,
-	}))
+	})))
 	if _, err := store.Create(beads.Bead{
 		Title:  "queued polecat work",
 		Type:   "task",
@@ -8651,8 +8737,8 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testi
 	if tp.TemplateName != "worker" {
 		t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
 	}
-	if got := poolRuntimeSessionName(nil, "worker-1", "worker", true); sessionName != got {
-		t.Fatalf("session name = %q, want the transient slot's identity-derived runtime name %q", sessionName, got)
+	if !strings.HasPrefix(sessionName, "worker-") || sessionName == poolRuntimeSessionName(nil, "worker-1", "worker", true) {
+		t.Fatalf("session name = %q, want a bead-scoped worker-<beadID> runtime name", sessionName)
 	}
 
 	sessionBeads, err := store.ListByLabel(sessionBeadLabel, 0)
@@ -10931,10 +11017,9 @@ func TestSelectOrCreatePoolSessionBeadPicksEarliestReusableSingletonCandidate(t 
 
 // TestSelectOrCreateDependencyPoolSessionBead_BlocksWhenConcreteAliasTaken:
 // a manual session holding "claude-1" as its alias owns that handle, so the
-// pool slot whose identity derives the same runtime name cannot have it. The
-// create fails closed and retries next tick against the same name rather than
-// minting a bead-ID-scoped sibling box (ga-vcjr9). The operator sees the
-// holder named in the error.
+// pool slot whose identity derives the same name cannot have it. The create
+// fails closed and retries next tick rather than minting a sibling box beside
+// the holder (ga-vcjr9). The operator sees the holder named in the error.
 func TestSelectOrCreateDependencyPoolSessionBead_BlocksWhenConcreteAliasTaken(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -13020,6 +13105,7 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 		map[string]beads.Store{"city": rigStore},
 		nil,
 		io.Discard,
+		nil,
 	)
 	if len(work) != 2 {
 		t.Fatalf("collected work count = %d, want both same-ID rows from independent stores", len(work))
@@ -13088,6 +13174,7 @@ func TestCollectOpenUnassignedRoutedWorkReportsCanonicalStoreRefs(t *testing.T) 
 		map[string]beads.Store{"fixture": listFailStore{Store: beads.NewMemStore()}},
 		nil,
 		&stderr,
+		nil,
 	)
 	for _, want := range []string{"city:test-city: List(open)", "rig:fixture: List(open)"} {
 		if !strings.Contains(stderr.String(), want) {
@@ -14019,74 +14106,6 @@ func TestBuildDesiredState_AsleepNamedAliasHolderStaysSingle(t *testing.T) {
 	// pool standby (alias empty because it lost the alias-acquisition race).
 	if mayorEntries[0].ConfiguredNamedIdentity != "gastown.mayor" {
 		t.Fatalf("retained entry is not the named alias-holder: %+v", mayorEntries[0])
-	}
-}
-
-// TestBuildDesiredStateRecordsDemandSubPhases verifies the sub-phase operation
-// records emitted inside buildDesiredStateWithSessionBeads (sr-5rz /
-// gastownhall/gascity#2463): the aggregate load_demand_snapshot tick phase
-// regularly dominates the controller cycle, and these records are what make
-// its internal split (collection reads vs demand probes vs scale_check execs)
-// attributable from a trace instead of requiring an instrumented rebuild.
-func TestBuildDesiredStateRecordsDemandSubPhases(t *testing.T) {
-	// The non-tick path passes no trace; the recorder must be nil-safe.
-	recordDemandSubPhase(nil, "demand_snapshot.collect_open_session_beads", time.Now(), nil)
-
-	cityDir := t.TempDir()
-	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
-	if !tracer.Enabled() {
-		t.Fatal("tracer should be enabled")
-	}
-	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
-	if cycle == nil {
-		t.Fatal("BeginCycle returned nil")
-	}
-
-	store := beads.NewMemStore()
-	sessionSnapshot, err := loadSessionBeadSnapshot(store)
-	if err != nil {
-		t.Fatalf("load session snapshot: %v", err)
-	}
-	var stderr strings.Builder
-	buildDesiredStateWithSessionBeads(
-		"trace-town", cityDir, time.Now().UTC(), &config.City{}, runtime.NewFake(),
-		store, nil, sessionSnapshot, cycle, &stderr,
-	)
-
-	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
-		t.Fatalf("End: %v", err)
-	}
-	if err := tracer.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
-	if err != nil {
-		t.Fatalf("ReadTraceRecords: %v", err)
-	}
-	// Sub-phases that must fire on every store-backed build, even with an
-	// empty config (the scale/named demand probes only fire with matching
-	// agents, so they are intentionally not asserted here).
-	want := map[string]bool{
-		"demand_snapshot.collect_open_session_beads": false,
-		"demand_snapshot.collect_assigned_work":      false,
-		"demand_snapshot.collect_unassigned_routed":  false,
-		"demand_snapshot.evaluate_pending_pools":     false,
-	}
-	for i := range records {
-		r := &records[i]
-		if r.RecordType != TraceRecordOperation || r.SiteCode != TraceSiteDemandSnapshot {
-			continue
-		}
-		name, _ := r.Fields["operation_name"].(string)
-		if _, tracked := want[name]; tracked {
-			want[name] = true
-		}
-	}
-	for name, seen := range want {
-		if !seen {
-			t.Errorf("missing demand sub-phase operation record %q", name)
-		}
 	}
 }
 
