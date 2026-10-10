@@ -73,3 +73,21 @@ abb88d89537caed5afe76d4afb8af66b06acf3e2:cmd/gc/session_reconciler_drift_resume_
 # (secret string intentionally not quoted here — that would re-trip the scanner.)
 9877ab55656f8c2698a82dab537e9eaad99a5866:cmd/gc/adoption_barrier_test.go:generic-api-key:247
 9877ab55656f8c2698a82dab537e9eaad99a5866:cmd/gc/adoption_barrier_test.go:generic-api-key:323
+
+# Upstream (gastownhall) test-fixture false positives surfaced by the fork
+# pre-push hook scanning the 267-commit origin merge range (a6ac2ab36..64f0d48bd).
+# All four are generic-api-key hits on upstream test code, all authored by an
+# upstream maintainer, and all four commits are ALREADY PUBLIC on
+# gastownhall/gascity (verified with git merge-base --is-ancestor against
+# origin/main), so allowlisting exposes nothing new. Verified individually:
+#   adoption_barrier_test.go:410    - a t.Fatalf format string ("row token %q,
+#                                     runtime %q/%q/%q"), no credential at all
+#   bazel_multilane_test.go:35      - setupBazelBeadsDigests, a map of SHA-256
+#                                     content digests pinning action.yml et al
+#   reconcile_session_differential_test.go:659 - session_key test literal
+#   city_runtime_v2_test.go:1419    - keys test literal
+# None are in fork-local commits. Added 2026-10-10 during origin merge (64f0d48bd).
+01abe99986a9e80e3a1ec0c6d264952921748a16:cmd/gc/reconcile_session_differential_test.go:generic-api-key:659
+5437f95162db0dd6efc1ae2aa3e004390d986f59:cmd/gc/adoption_barrier_test.go:generic-api-key:410
+6f5f6fec4aa4ba27c381ef84ccbb3898d21493e3:cmd/gc/city_runtime_v2_test.go:generic-api-key:1419
+a762c6aebfbc5d8b34cb64611bfdfa85ccd5b8d1:scripts/bazel_multilane_test.go:generic-api-key:35
