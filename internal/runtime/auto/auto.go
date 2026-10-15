@@ -30,26 +30,33 @@ type Provider struct {
 }
 
 var (
-	_ runtime.Provider                      = (*Provider)(nil)
-	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
-	_ runtime.InteractionProvider           = (*Provider)(nil)
-	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
-	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
-	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
-	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
-	_ runtime.RelaunchProvider              = (*Provider)(nil)
-	_ runtime.LivenessObserver              = (*Provider)(nil)
-	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
-	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
-	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
-	_ runtime.SessionObjectKiller           = (*Provider)(nil)
-	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
-	_ runtime.SessionEventProvider          = (*Provider)(nil)
-	_ runtime.BackendListingProvider        = (*Provider)(nil)
-	_ runtime.BackendsProvider              = (*Provider)(nil)
-	_ runtime.ListingAttestation            = (*Provider)(nil)
-	_ runtime.Router                        = (*Provider)(nil)
-	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
+	_ runtime.Provider                        = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker       = (*Provider)(nil)
+	_ runtime.InteractionProvider             = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider            = (*Provider)(nil)
+	_ runtime.InterruptBoundaryWaitProvider   = (*Provider)(nil)
+	_ runtime.TurnInterruptCapabilityProvider = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider    = (*Provider)(nil)
+	_ runtime.InputClearProvider              = (*Provider)(nil)
+	_ runtime.TransportCapabilityProvider     = (*Provider)(nil)
+	_ runtime.RelaunchProvider                = (*Provider)(nil)
+	_ runtime.LivenessObserver                = (*Provider)(nil)
+	_ runtime.UnattendedSessionStopper        = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError       = (*Provider)(nil)
+	_ runtime.FreshLivenessObserver           = (*Provider)(nil)
+	_ runtime.SessionObjectKiller             = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError     = (*Provider)(nil)
+	_ runtime.SessionEventProvider            = (*Provider)(nil)
+	_ runtime.BackendListingProvider          = (*Provider)(nil)
+	_ runtime.BackendsProvider                = (*Provider)(nil)
+	_ runtime.ListingAttestation              = (*Provider)(nil)
+	_ runtime.Router                          = (*Provider)(nil)
+	_ runtime.ServerDeathConfirmer            = (*Provider)(nil)
+	_ runtime.DialogProvider                  = (*Provider)(nil)
+	_ runtime.EnvironmentBatchProvider        = (*Provider)(nil)
+	_ runtime.ServerLifecycleProvider         = (*Provider)(nil)
+	_ runtime.SessionRosterProvider           = (*Provider)(nil)
+	_ runtime.TurnEventProvider               = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -116,12 +123,18 @@ func (p *Provider) RouteFor(name string) runtime.Route {
 	return runtime.Route{Backend: p.defaultBackend(), Known: seeded}
 }
 
+// Backend labels of the two legs, as [Provider.Backends] reports them.
+const (
+	DefaultBackendLabel = "default"
+	ACPBackendLabel     = "acp"
+)
+
 func (p *Provider) defaultBackend() runtime.Backend {
-	return runtime.Backend{Label: "default", Provider: p.defaultSP}
+	return runtime.Backend{Label: DefaultBackendLabel, Provider: p.defaultSP}
 }
 
 func (p *Provider) acpBackend() runtime.Backend {
-	return runtime.Backend{Label: "acp", Provider: p.acpSP}
+	return runtime.Backend{Label: ACPBackendLabel, Provider: p.acpSP}
 }
 
 func (p *Provider) route(name string) runtime.Provider {
@@ -465,6 +478,15 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 	return runtime.ErrInteractionUnsupported
 }
 
+// ClearInput delegates to the routed backend when it can empty a session's
+// input box and confirm it is empty.
+func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	if cp, ok := p.route(name).(runtime.InputClearProvider); ok {
+		return cp.ClearInput(ctx, name, restoreWindow)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
 // Relaunch forwards a warm-box agent relaunch to the routed backend when it
 // supports one, so the reconciler's RelaunchProvider type-assert is not masked
 // by the auto router.
@@ -473,6 +495,12 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return rp.Relaunch(ctx, name, cfg)
 	}
 	return runtime.ErrRelaunchUnsupported
+}
+
+// TurnInterruptMode reports how the routed backend cancels the session's
+// in-flight turn.
+func (p *Provider) TurnInterruptMode(name string) runtime.TurnInterruptMode {
+	return runtime.TurnInterruptModeFor(p.route(name), name)
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm
@@ -500,6 +528,40 @@ func (p *Provider) Respond(name string, response runtime.InteractionResponse) er
 		return ip.Respond(name, response)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+// DismissKnownDialogs delegates to the routed backend when it can dismiss
+// startup dialogs.
+func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	if dp, ok := p.route(name).(runtime.DialogProvider); ok {
+		return dp.DismissKnownDialogs(ctx, name, timeout)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+// GetAllEnvironment delegates to the routed backend when it has a batched
+// environment read.
+func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
+	if ep, ok := p.route(name).(runtime.EnvironmentBatchProvider); ok {
+		return ep.GetAllEnvironment(name)
+	}
+	return nil, fmt.Errorf("%w: session %q", runtime.ErrEnvironmentBatchUnsupported, name)
+}
+
+// ConfigureServer configures the server of every backend that has one.
+func (p *Provider) ConfigureServer() error {
+	return runtime.ConfigureServers(p.Backends())
+}
+
+// TeardownServer tears down the server of every backend that has one, so a
+// full stop through the composite still ends the tmux server.
+func (p *Provider) TeardownServer() error {
+	return runtime.TeardownServers(p.Backends())
+}
+
+// SessionRoster merges the backends' rosters ([runtime.MergeSessionRosters]).
+func (p *Provider) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return runtime.MergeSessionRosters(p, p.Backends())
 }
 
 // SetMeta delegates to the routed backend.
@@ -609,4 +671,15 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	return runtime.SubscribeSessionEventSources(ctx,
 		runtime.SessionEventSource{Name: "default", Provider: p.defaultSP},
 		runtime.SessionEventSource{Name: "ACP", Provider: p.acpSP})
+}
+
+// SubscribeTurnEvents forwards the turn-event streams of the backends that
+// implement runtime.TurnEventProvider, merging them when both do, the same
+// way SubscribeSessionEvents does. A nested composite without a turn-event
+// backend is skipped, so ACP turns behind an inner composite still arrive.
+// See runtime.SubscribeTurnEventSources.
+func (p *Provider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
+	return runtime.SubscribeTurnEventSources(ctx,
+		runtime.TurnEventSource{Name: "default", Provider: p.defaultSP},
+		runtime.TurnEventSource{Name: "ACP", Provider: p.acpSP})
 }

@@ -25,7 +25,7 @@ var allProjectedMetadataKeys = []string{
 	"resume_style", "resume_command", "continuation_epoch", "sleep_reason",
 	NamedSessionIdentityMetadata, NamedSessionMetadataKey, NamedSessionModeMetadata,
 	"common_name", "pool_slot", "pool_managed", "session_origin",
-	"dependency_only", "manual_session",
+	"dependency_only", "manual_session", "resume_failures", "resume_launch",
 	"pool_alias_conflict", "pool_alias_conflict_count", "pool_alias_conflict_at",
 	MCPIdentityMetadataKey,
 	MCPServersSnapshotMetadataKey, "provider_terminal_error", "session_health",
@@ -34,7 +34,7 @@ var allProjectedMetadataKeys = []string{
 	beadmeta.PackMetadataKey, beadmeta.PackWorkspaceMetadataKey, beadmeta.WorkDirMetadataKey,
 	beadmeta.WorkerDirMetadataKey,
 	"pending_create_claim", "pending_create_started_at", "quarantined_until",
-	aliasHistoryMetadataKey, "continuity_eligible", "last_woke_at", "slept_at", "awake_started_at", "usage_compute_emitted_at", "state_reason",
+	aliasHistoryMetadataKey, "continuity_eligible", "last_woke_at", "slept_at", "suspended_at", "awake_started_at", "usage_compute_emitted_at", "state_reason",
 	"creation_complete_at", "continuation_reset_pending", SessionCircuitStateMetadataKey,
 	ResetCommittedAtKey,
 	"generation", "started_config_hash", "pin_awake", "held_until", "wait_hold",
@@ -45,7 +45,7 @@ var allProjectedMetadataKeys = []string{
 	"config_drift_deferred_key", "attached_config_drift_deferred_at",
 	"attached_config_drift_deferred_key", "stranded_event_emitted_at",
 	"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at",
-	"session_name_explicit", "wake_request", "restart_requested",
+	"session_name_explicit", "wake_request", "wake_requested_at", "restart_requested",
 	"session_id_flag", "template_overrides", "wake_attempts",
 	"wake_refused_event_at",
 	MetadataLastNudgeDeliveredAt, "provider_kind", "builtin_ancestor",
@@ -181,7 +181,7 @@ func oraclePatches() []MetadataPatch {
 		{"pending_create_claim": " true "}, // untrimmed mirror vs trimmed bool
 		{"manual_session": "1"},
 		{"session_drainable": "true"},
-		{"wake_requested_at": "2026-01-01T00:00:00Z"}, // unprojected key: must not change Info
+		{"wake_requested_at": "2026-01-01T00:00:00Z"}, // projected timestamp: folds through its codec row
 		{"env.GC_FOO": "bar"},                         // unprojected key
 		{"state": "idle", "session_name": "", "provider": "codex", "wake_attempts": "9", "held_until": ""}, // multi-key mix
 	}

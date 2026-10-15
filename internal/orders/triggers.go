@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 )
@@ -161,6 +162,7 @@ func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc, opts TriggerOp
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad interval: %v", err)}
 	}
+	interval = clock.Backstop(interval)
 
 	effective := interval
 	if opts.HintFn != nil {
