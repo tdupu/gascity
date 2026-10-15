@@ -91,3 +91,31 @@ abb88d89537caed5afe76d4afb8af66b06acf3e2:cmd/gc/session_reconciler_drift_resume_
 5437f95162db0dd6efc1ae2aa3e004390d986f59:cmd/gc/adoption_barrier_test.go:generic-api-key:410
 6f5f6fec4aa4ba27c381ef84ccbb3898d21493e3:cmd/gc/city_runtime_v2_test.go:generic-api-key:1419
 a762c6aebfbc5d8b34cb64611bfdfa85ccd5b8d1:scripts/bazel_multilane_test.go:generic-api-key:35
+
+# Allowlist 14 upstream test-fixture gitleaks hits from the origin merge
+# (77d9f94a5, 2026-10-14). Every finding is in an UPSTREAM commit: all seven
+# leak-bearing commits are ALREADY PUBLIC on gastownhall/gascity (verified with
+# git merge-base --is-ancestor against origin/main), so allowlisting exposes
+# nothing new, and none is in a fork-local commit. Verified individually:
+#   11 hits across reconcile_arms_drift_test.go, reconcile_effect_drift_test.go,
+#     reconcile_session_differential_test.go, reconcile_session_timeline_test.go
+#     and session_reconciler_manual_create_test.go - all the same test literal,
+#     a session-key field name paired with a conversation-N value; the rule
+#     fires on the adjacent key-like identifier, there is no credential
+#   dialog_test.go:1717            - const key = a hardcoded UUID test constant
+#   ga-3oog6w-...nudge-gate.md:97  - an OpenAPI base file SHA-256 content digest
+#   cache-rrc-probe.sh:138         - key= a 64-hex RBE cache key (content digest)
+48e2f23ed0246c56a32c671ce54bd32a6b80fa46:cmd/gc/reconcile_arms_drift_test.go:generic-api-key:195
+48e2f23ed0246c56a32c671ce54bd32a6b80fa46:cmd/gc/reconcile_arms_drift_test.go:generic-api-key:245
+48e2f23ed0246c56a32c671ce54bd32a6b80fa46:cmd/gc/reconcile_arms_drift_test.go:generic-api-key:248
+48e2f23ed0246c56a32c671ce54bd32a6b80fa46:cmd/gc/reconcile_effect_drift_test.go:generic-api-key:25
+48e2f23ed0246c56a32c671ce54bd32a6b80fa46:cmd/gc/reconcile_effect_drift_test.go:generic-api-key:137
+48e2f23ed0246c56a32c671ce54bd32a6b80fa46:cmd/gc/reconcile_effect_drift_test.go:generic-api-key:141
+c573b006f1d5063362612300ea7f92daf93dd5cb:cmd/gc/reconcile_session_differential_test.go:generic-api-key:1188
+4b53efe289e27c0309225aee62921d63d4d3dd7a:cmd/gc/reconcile_session_differential_test.go:generic-api-key:1496
+48e2f23ed0246c56a32c671ce54bd32a6b80fa46:cmd/gc/reconcile_session_differential_test.go:generic-api-key:1514
+c573b006f1d5063362612300ea7f92daf93dd5cb:cmd/gc/reconcile_session_timeline_test.go:generic-api-key:1000
+68ae14717a20f5a772a6bb8e2564168e302478b0:cmd/gc/session_reconciler_manual_create_test.go:generic-api-key:44
+468a4bfc2f8dbd45db6ae8d057a19fc6350eb3ab:internal/runtime/dialog_test.go:generic-api-key:1717
+26b1c9aedd08678f5df4de3a0a8429cda559c6df:release-gates/ga-3oog6w-hook-claim-continuation-nudge-gate.md:generic-api-key:97
+d24ebe49731a13b9d97d6dab01be4a626fb08304:tools/rbe/cache-rrc-probe.sh:generic-api-key:138
